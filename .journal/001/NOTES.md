@@ -19,3 +19,13 @@ Key findings:
 - Deferred: ntp/syslog/ssh_service/dns_forwarding/prefix_lists/route_maps/bgp/ospf/dhcp_server/wireguard (second wave); ipsec, config restore/merge, system_image, commit-confirm (hard, constrained workflows only); skip imperative resets/reboots as declarative ops.
 Full report: session agent artifact `agent://VyosOpsResearch` (43.9KB, cited).
 Next: user review of the list; then decide first-wave scope before gutting the sample domain.
+
+## 2026-08-14 14:50 — First-wave scope locked (user decision)
+User's real workflow (from `~/code/lab/infra/network/vyos`): full bracket-format `gateway.conf` in git as source of truth, SOPS secret injection at render time, backup active config, scp + native `load` + `commit`, verify connectivity, then `save`. Ansible's `vyos_config` could not parse bracket format, so the playbook shells out via `vyos_command` — pyinfra-vyos should replace that playbook outright.
+Locked first wave:
+- Operation `config_load`: upload rendered whole config, one vbash session `load` + `compare`; empty diff → noop (no commit); else `commit`; `save` a separate explicit decision (supports commit-verify-save workflow). Version-guarded via `Version` fact.
+- Session substrate: `sg vyattacfg` + `vbash -s` + script-template session, checked exit codes (wrappers can mask failures), one session/one commit.
+- Facts: `Version`, `Configuration` (`show configuration json`), `ConfigurationCommands` (canonical set-command form; backup source).
+Demoted to second wave: all typed ops (generic `configuration` scoped diff, system_basics, interfaces, static_routes, firewall_groups, firewall_rules, nat_rules, users) plus previous second-wave list.
+Residual risks accepted (inherent to current workflow too): bad load can sever SSH mid-apply (mitigated by commit-without-save + verify), multi-component partial commit.
+Next: template first-setup (rename to pyinfra-vyos, placeholders, relock), then implement first wave in place of sample git-config domain.
