@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from template_pyinfra._gitconfig import (
+from pyinfra_vyos._gitconfig import (
     GitConfigError,
     config_changes,
     config_commands,

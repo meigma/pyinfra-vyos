@@ -33,8 +33,8 @@ def _load_script(name: str) -> ModuleType:
 
 validate_release = _load_script("validate_release")
 
-PACKAGE = "template-pyinfra"
-MODULE = "template_pyinfra"
+PACKAGE = "pyinfra-vyos"
+MODULE = "pyinfra_vyos"
 VERSION = "1.2.3"
 
 

@@ -1,10 +1,10 @@
 [project]
-name = "template-pyinfra"
+name = "pyinfra-vyos"
 version = "0.1.0"
-description = "Template repository for pyinfra plugin packages"
+description = "pyinfra facts and operations for VyOS routers"
 readme = "README.md"
 authors = [
-    { name = "Joshua Gilman", email = "joshuagilman@gmail.com" }
+    { name = "Meigma" }
 ]
 # The interpreter pinned in .python-version is the development version; this
 # floor is deliberately lower so generated packages stay broadly installable.
@@ -17,7 +17,7 @@ dependencies = [
 # ordinary importable modules and need no registration. Uncomment and adapt
 # only if this project grows a custom connector.
 # [project.entry-points.'pyinfra.connectors']
-# example = "template_pyinfra.connectors.example:ExampleConnector"
+# example = "pyinfra_vyos.connectors.example:ExampleConnector"
 
 [build-system]
 requires = ["hatchling"]

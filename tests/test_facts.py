@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from pyinfra.api.exceptions import FactProcessError
 
-from template_pyinfra.facts import GitConfig, GitVersion
+from pyinfra_vyos.facts import GitConfig, GitVersion
 
 
 def test_git_version_fact_runs_git_version() -> None:

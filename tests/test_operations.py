@@ -5,10 +5,10 @@ import inspect
 import pytest
 from pyinfra.api.exceptions import OperationValueError
 
-import template_pyinfra
-from template_pyinfra._cli import CommandError, QuoteString, git_command
-from template_pyinfra._gitconfig import GitConfigError, validate_config_key
-from template_pyinfra.operations import _guarded, config_entry
+import pyinfra_vyos
+from pyinfra_vyos._cli import CommandError, QuoteString, git_command
+from pyinfra_vyos._gitconfig import GitConfigError, validate_config_key
+from pyinfra_vyos.operations import _guarded, config_entry
 
 
 def test_guarded_returns_the_wrapped_result() -> None:
@@ -59,6 +59,6 @@ def test_config_entry_signature_keeps_state_flags_keyword_only() -> None:
 
 
 def test_package_exports_the_sample_primitives() -> None:
-    assert template_pyinfra.__all__ == ["GitConfig", "GitVersion", "config_entry"]
-    for exported in template_pyinfra.__all__:
-        assert getattr(template_pyinfra, exported) is not None
+    assert pyinfra_vyos.__all__ == ["GitConfig", "GitVersion", "config_entry"]
+    for exported in pyinfra_vyos.__all__:
+        assert getattr(pyinfra_vyos, exported) is not None

@@ -1,6 +1,6 @@
-# template-pyinfra
+# pyinfra-vyos
 
-`template-pyinfra` is the reusable repository starter for Meigma
+`pyinfra-vyos` is the reusable repository starter for Meigma
 [pyinfra](https://pyinfra.com) plugin packages — distributions that ship custom
 facts and operations for other people's deploys to import.
 
@@ -96,7 +96,7 @@ hosts = ["@local"]
 # deploy.py
 from pyinfra import host
 
-from template_pyinfra import GitConfig, GitVersion, config_entry
+from pyinfra_vyos import GitConfig, GitVersion, config_entry
 
 version = host.get_fact(GitVersion)
 config = host.get_fact(GitConfig, path="/srv/checkout")
@@ -134,10 +134,10 @@ Four files hold the sample, and they are the four to replace:
 
 | File | Role |
 | --- | --- |
-| `src/template_pyinfra/facts.py` | Public `FactBase` classes only |
-| `src/template_pyinfra/operations.py` | Public `@operation` functions only |
-| `src/template_pyinfra/_gitconfig.py` | Pure domain logic: parse, diff, build commands |
-| `src/template_pyinfra/_cli.py` | Command assembly, quoting, and option-lookalike rejection |
+| `src/pyinfra_vyos/facts.py` | Public `FactBase` classes only |
+| `src/pyinfra_vyos/operations.py` | Public `@operation` functions only |
+| `src/pyinfra_vyos/_gitconfig.py` | Pure domain logic: parse, diff, build commands |
+| `src/pyinfra_vyos/_cli.py` | Command assembly, quoting, and option-lookalike rejection |
 
 `_cli.py` is the layer to keep. It holds the security contract every operation
 depends on: user values are wrapped in `QuoteString`, values that begin with

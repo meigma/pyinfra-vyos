@@ -54,7 +54,7 @@ jobs:
 
           wheel=$(find dist -maxdepth 1 -name '*.whl' -print -quit)
           uv run --no-project --with "$wheel" -- \
-            python -c 'import template_pyinfra; from importlib.metadata import version; print(version("template-pyinfra"))'
+            python -c 'import pyinfra_vyos; from importlib.metadata import version; print(version("pyinfra-vyos"))'
 
       - name: Rehearse registry upload
         run: uv publish --dry-run dist/*

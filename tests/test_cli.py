@@ -5,9 +5,9 @@ import inspect
 import pytest
 from pyinfra.api.arguments import all_argument_meta
 
-import template_pyinfra
-from template_pyinfra import operations
-from template_pyinfra._cli import CommandError, QuoteString, git_command
+import pyinfra_vyos
+from pyinfra_vyos import operations
+from pyinfra_vyos._cli import CommandError, QuoteString, git_command
 
 
 def test_git_command_quotes_user_values() -> None:
@@ -84,7 +84,7 @@ def test_no_operation_parameter_collides_with_pyinfra_reserved_arguments() -> No
     reserved = set(all_argument_meta)
     assert "name" in reserved
     checked = 0
-    for exported in template_pyinfra.__all__:
+    for exported in pyinfra_vyos.__all__:
         function = getattr(operations, exported, None)
         if function is None or not callable(function):
             continue

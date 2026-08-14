@@ -6,7 +6,7 @@ import pytest
 from pyinfra.api.exceptions import OperationValueError
 from pyinfra.api.operations import run_ops
 
-from template_pyinfra import GitConfig, GitVersion, config_entry
+from pyinfra_vyos import GitConfig, GitVersion, config_entry
 
 from ._helpers import apply, config_value, fact_value, init_repository, prepare, run_git
 

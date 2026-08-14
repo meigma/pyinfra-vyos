@@ -7,8 +7,8 @@ tags:
   - 'uv'
 
 project:
-  title: 'template-pyinfra docs'
-  description: 'MkDocs documentation site for the Meigma pyinfra repository template.'
+  title: 'pyinfra-vyos docs'
+  description: 'MkDocs documentation site for pyinfra-vyos.'
   owner: 'meigma'
   maintainers:
     - 'meigma'

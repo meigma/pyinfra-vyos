@@ -1,8 +1,8 @@
-site_name: template-pyinfra
-site_description: Meigma pyinfra plugin repository template
-site_url: https://meigma.github.io/template-pyinfra/
-repo_name: meigma/template-pyinfra
-repo_url: https://github.com/meigma/template-pyinfra
+site_name: pyinfra-vyos
+site_description: pyinfra facts and operations for VyOS routers
+site_url: https://meigma.github.io/pyinfra-vyos/
+repo_name: meigma/pyinfra-vyos
+repo_url: https://github.com/meigma/pyinfra-vyos
 edit_uri: edit/main/docs/docs/
 docs_dir: docs
 site_dir: build

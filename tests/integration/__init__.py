@@ -1,1 +1,1 @@
-"""Integration tests exercising template-pyinfra against the real git CLI."""
+"""Integration tests exercising pyinfra-vyos against the real git CLI."""

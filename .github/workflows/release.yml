@@ -126,7 +126,7 @@ jobs:
 
           wheel=$(find dist -maxdepth 1 -name '*.whl' -print -quit)
           uv run --no-project --with "$wheel" -- \
-            python -c 'import template_pyinfra; from importlib.metadata import version; print(version("template-pyinfra"))'
+            python -c 'import pyinfra_vyos; from importlib.metadata import version; print(version("pyinfra-vyos"))'
 
       # Written outside dist/ so it is never mistaken for a publishable file.
       # The subject names in checksums.txt stay bare filenames, which is what
@@ -199,14 +199,14 @@ jobs:
             echo
             echo '```sh'
             echo "workdir=\$(mktemp -d)"
-            echo "python3 -m pip download --no-deps --dest \"\$workdir\" \"template-pyinfra==${RELEASE_VERSION}\""
-            echo "gh attestation verify \"\$workdir/template_pyinfra-${RELEASE_VERSION}-py3-none-any.whl\" --repo \"$GITHUB_REPOSITORY\" --signer-workflow \"$GITHUB_REPOSITORY/.github/workflows/attest.yml\" --source-ref \"refs/tags/$RELEASE_TAG\" --deny-self-hosted-runners"
+            echo "python3 -m pip download --no-deps --dest \"\$workdir\" \"pyinfra-vyos==${RELEASE_VERSION}\""
+            echo "gh attestation verify \"\$workdir/pyinfra_vyos-${RELEASE_VERSION}-py3-none-any.whl\" --repo \"$GITHUB_REPOSITORY\" --signer-workflow \"$GITHUB_REPOSITORY/.github/workflows/attest.yml\" --source-ref \"refs/tags/$RELEASE_TAG\" --deny-self-hosted-runners"
             echo '```'
             echo
             echo "Install the published version:"
             echo
             echo '```sh'
-            echo "uv pip install \"template-pyinfra==${RELEASE_VERSION}\""
-            echo "python -c 'import template_pyinfra; from importlib.metadata import version; print(version(\"template-pyinfra\"))'"
+            echo "uv pip install \"pyinfra-vyos==${RELEASE_VERSION}\""
+            echo "python -c 'import pyinfra_vyos; from importlib.metadata import version; print(version(\"pyinfra-vyos\"))'"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
