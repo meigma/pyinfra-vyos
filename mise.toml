@@ -1,4 +1,4 @@
-# mise: tool and environment management for template-pyinfra.
+# mise: tool and environment management for pyinfra-vyos.
 #
 # Tool releases use mise's verifying Aqua backend. The committed mise.lock
 # records per-platform download URLs and checksums, and locked mode makes

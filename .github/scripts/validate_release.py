@@ -20,7 +20,7 @@ from collections.abc import Sequence
 from email.message import Message
 from typing import NoReturn
 
-PACKAGE_NAME = "template-pyinfra"
+PACKAGE_NAME = "pyinfra-vyos"
 
 
 def fail(message: str) -> NoReturn:

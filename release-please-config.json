@@ -9,13 +9,13 @@
   "bump-patch-for-minor-pre-major": true,
   "packages": {
     ".": {
-      "package-name": "template-pyinfra",
+      "package-name": "pyinfra-vyos",
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
         {
           "type": "toml",
           "path": "uv.lock",
-          "jsonpath": "$.package[?(@.name.value==\"template-pyinfra\")].version"
+          "jsonpath": "$.package[?(@.name.value==\"pyinfra-vyos\")].version"
         }
       ]
     }
