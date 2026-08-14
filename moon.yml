@@ -3,8 +3,8 @@ layer: 'library'
 stack: 'backend'
 
 project:
-  title: 'template-pyinfra'
-  description: 'Meigma pyinfra plugin repository template.'
+  title: 'pyinfra-vyos'
+  description: 'pyinfra facts and operations for VyOS routers.'
   owner: 'meigma'
   maintainers:
     - 'meigma'
@@ -109,8 +109,8 @@ tasks:
     inputs:
       - '@group(packageSources)'
     outputs:
-      - 'dist/template_pyinfra-*.tar.gz'
-      - 'dist/template_pyinfra-*.whl'
+      - 'dist/pyinfra_vyos-*.tar.gz'
+      - 'dist/pyinfra_vyos-*.whl'
 
   # Drives the real pyinfra API against @local and touches the filesystem. The
   # dedicated integration workflow selects this task explicitly; ordinary CI

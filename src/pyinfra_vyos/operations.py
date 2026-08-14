@@ -19,15 +19,15 @@ from pyinfra import host
 from pyinfra.api import StringCommand, operation
 from pyinfra.api.exceptions import OperationValueError
 
-from template_pyinfra._cli import CommandError
-from template_pyinfra._gitconfig import (
+from pyinfra_vyos._cli import CommandError
+from pyinfra_vyos._gitconfig import (
     GitConfigError,
     config_changes,
     config_commands,
     validate_config_key,
     validate_repository_path,
 )
-from template_pyinfra.facts import DEFAULT_PATH, GitConfig
+from pyinfra_vyos.facts import DEFAULT_PATH, GitConfig
 
 __all__ = ["config_entry"]
 
@@ -60,7 +60,7 @@ def config_entry(
 ) -> Generator[StringCommand, None, None]:
     """Ensure one repository-local git configuration entry.
 
-    Reads :class:`~template_pyinfra.facts.GitConfig` for ``path``, and when
+    Reads :class:`~pyinfra_vyos.facts.GitConfig` for ``path``, and when
     the entry already matches, no-ops. Otherwise it runs
     ``git -C <path> config --local --replace-all <key> <value>`` to set it,
     or ``git -C <path> config --local --unset-all <key>`` when

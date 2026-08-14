@@ -29,7 +29,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 
-from template_pyinfra._cli import QuoteString, StringCommand, git_command
+from pyinfra_vyos._cli import QuoteString, StringCommand, git_command
 
 __all__ = [
     "GitConfigError",
@@ -94,7 +94,7 @@ def validate_config_key(key: str) -> None:
 def validate_repository_path(path: str) -> None:
     """Reject a repository path that cannot be passed to ``git -C``.
 
-    :func:`~template_pyinfra._cli.git_command` guards the same thing, but it
+    :func:`~pyinfra_vyos._cli.git_command` guards the same thing, but it
     is reached first from inside fact collection, where the failure surfaces
     as an unhandled error rather than a rejected operation argument. Checking
     here lets the operation reject the path up front.

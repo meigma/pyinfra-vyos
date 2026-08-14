@@ -19,11 +19,11 @@ Facts and operations are ordinary importable modules: pyinfra discovers only
 connectors through entry points, so nothing here needs registration. Deploys
 import them directly::
 
-    from template_pyinfra import GitConfig, config_entry
+    from pyinfra_vyos import GitConfig, config_entry
 """
 
-from template_pyinfra.facts import GitConfig, GitVersion
-from template_pyinfra.operations import config_entry
+from pyinfra_vyos.facts import GitConfig, GitVersion
+from pyinfra_vyos.operations import config_entry
 
 __all__ = [
     "GitConfig",

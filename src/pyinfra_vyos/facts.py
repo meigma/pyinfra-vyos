@@ -20,8 +20,8 @@ from typing import ParamSpec, TypeVar
 from pyinfra.api import FactBase, StringCommand
 from pyinfra.api.exceptions import FactProcessError
 
-from template_pyinfra._cli import git_command
-from template_pyinfra._gitconfig import parse_config_list
+from pyinfra_vyos._cli import git_command
+from pyinfra_vyos._gitconfig import parse_config_list
 
 __all__ = ["GitConfig", "GitVersion"]
 
