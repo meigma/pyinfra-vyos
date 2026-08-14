@@ -1,0 +1,52 @@
+# Reusable workflow that generates artifact PROVENANCE in isolation from the build
+# jobs that call it. A reusable workflow runs in its own execution context with its
+# own OIDC identity — the caller can inject neither steps nor secrets — so the
+# signing material is unreachable by the build's user-defined steps. That isolation
+# is the SLSA Build L3 requirement; GitHub artifact attestations generated in-job
+# are only L2. Provenance is still written to GitHub's attestation API, so
+# `gh attestation verify` keeps working — but the signer-workflow is now this file:
+#
+#   gh attestation verify <artifact> --repo <repo> \
+#     --signer-workflow <repo>/.github/workflows/attest.yml --source-ref refs/tags/<tag>
+#
+# SLSA note: L3 makes the signed provenance unforgeable; it does not, by itself,
+# make the build hermetic. The build job still computes the checksums it passes
+# in — L3's guarantee is that the signature cannot be tampered with because the
+# key lives only in this isolated workflow.
+#
+# This repository publishes a Python distribution and no container image, so the
+# workflow takes the checksums input only. Adding image provenance later means
+# adding subject-name/subject-digest inputs plus an attest-build-provenance step,
+# and granting `packages: write` in both this job and every caller.
+
+name: Attest (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      checksums-artifact:
+        description: Name of an uploaded artifact containing checksums.txt.
+        type: string
+        required: true
+
+permissions: {}
+
+jobs:
+  attest:
+    name: Attest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      id-token: write # OIDC token minted HERE, isolated from the build job
+      attestations: write # write provenance to GitHub's attestation API
+      contents: read
+    steps:
+      - name: Download checksums
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.checksums-artifact }}
+
+      - name: Attest distribution checksums
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: checksums.txt

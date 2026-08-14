@@ -1,0 +1,6 @@
+# Toolchains are empty by design.
+#
+# Tool versions (Python, uv, moon) are managed by mise (mise.toml + mise.lock);
+# moon runs every task against `system` binaries that mise puts on PATH, so no
+# language toolchain is declared here and moon never installs a second Python
+# or uv runtime.

@@ -1,0 +1,26 @@
+# Shared Moon workspace configuration for the repository template.
+# Keep the current projects explicit, then uncomment the discovery patterns
+# below as the template grows into apps, packages, or services.
+
+projects:
+  globs: []
+  sources:
+    root: '.'
+    docs: 'docs'
+
+  # Uncomment to auto-discover more projects as the repository grows.
+  # globs:
+  #   - 'apps/*'
+  #   - 'packages/*'
+  #   - 'services/*'
+  #   - 'tools/*'
+
+defaultProject: 'root'
+
+vcs:
+  defaultBranch: 'main'
+  provider: 'github'
+
+# uv commands synchronize the locked environment explicitly inside each task.
+pipeline:
+  installDependencies: false

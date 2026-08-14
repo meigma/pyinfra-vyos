@@ -1,0 +1,212 @@
+# Release Please creates the v* tag and a draft GitHub release. This workflow is
+# tag-triggered: it re-runs the quality gates, independently rebuilds the tagged
+# source, publishes to PyPI through Trusted Publishing, and attests the built
+# distributions from an isolated reusable workflow (SLSA L3). Publishing the
+# draft GitHub release stays a human decision after inspection.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - v*
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to publish
+        required: true
+        type: string
+
+permissions: {}
+
+# A publish must never be cancelled by a later run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  resolve-release:
+    name: Resolve Release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.release-tag.outputs.tag }}
+      version: ${{ steps.release-tag.outputs.version }}
+    steps:
+      - name: Resolve release tag
+        id: release-tag
+        env:
+          DISPATCH_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            tag="$DISPATCH_TAG"
+          else
+            tag="$GITHUB_REF_NAME"
+          fi
+
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+            echo "Release tag must match vX.Y.Z or vX.Y.Z-prerelease: $tag" >&2
+            exit 1
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      # Release Please creates the tag and the draft release in separate API
+      # calls, so the tag push can arrive first. Reading a draft release needs
+      # contents: write.
+      - name: Wait for draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release-tag.outputs.tag }}
+        run: |
+          for attempt in $(seq 1 30); do
+            if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft' 2>/dev/null | grep -qx true; then
+              exit 0
+            fi
+            echo "Draft release $RELEASE_TAG is not ready yet; retrying..."
+            sleep 10
+          done
+
+          echo "Draft release $RELEASE_TAG was not found or is not a draft." >&2
+          exit 1
+
+  publish-pypi:
+    name: Publish to PyPI
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    needs:
+      - resolve-release
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write # PyPI Trusted Publishing
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check out requested tag
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.tag }}
+        run: git checkout --detach "$RELEASE_TAG"
+
+      - name: Setup mise
+        uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4.2.4
+        with:
+          version: 2026.6.14
+          # Cache disabled in the publishing pipeline: a poisoned Actions cache
+          # could influence the toolchain that builds real release artifacts, so
+          # tools are always fetched fresh and re-verified against mise.lock.
+          cache: false
+
+      - name: Run release quality gates
+        run: moon run root:check --summary minimal
+
+      # root:check leaves a development build in dist/; --clear discards it so
+      # only the --no-sources distributions are published.
+      - name: Build publishable distributions
+        run: uv build --no-sources --clear
+
+      - name: Validate distribution metadata
+        env:
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.tag }}
+        run: python3 .github/scripts/validate_release.py --tag "$RELEASE_TAG"
+
+      - name: Smoke test installed wheel
+        run: |
+          set -euo pipefail
+
+          wheel=$(find dist -maxdepth 1 -name '*.whl' -print -quit)
+          uv run --no-project --with "$wheel" -- \
+            python -c 'import template_pyinfra; from importlib.metadata import version; print(version("template-pyinfra"))'
+
+      # Written outside dist/ so it is never mistaken for a publishable file.
+      # The subject names in checksums.txt stay bare filenames, which is what
+      # `gh attestation verify` matches against a downloaded distribution.
+      - name: Generate distribution checksums
+        run: |
+          set -euo pipefail
+
+          mkdir -p checksums
+          (cd dist && sha256sum -- *.tar.gz *.whl) > checksums/checksums.txt
+          cat checksums/checksums.txt
+
+      - name: Upload checksums for isolated attestation
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-checksums
+          path: checksums/checksums.txt
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Publish distributions
+        run: uv publish --trusted-publishing always dist/*
+
+  # Generate distribution provenance in an ISOLATED reusable workflow (SLSA L3):
+  # the signing OIDC token is minted in attest.yml, unreachable by the build
+  # steps. template-go's caller also grants packages: write because its attest
+  # job is shared with a container-image attestation; this repository publishes
+  # no image, so the caller grants exactly what the attest job declares.
+  attest-artifacts:
+    needs:
+      - publish-pypi
+    permissions:
+      id-token: write
+      attestations: write
+      contents: read
+    uses: ./.github/workflows/attest.yml
+    with:
+      checksums-artifact: release-checksums
+
+  release-inspection-summary:
+    name: Release Inspection Summary
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs:
+      - resolve-release
+      - publish-pypi
+      - attest-artifacts
+    permissions: {}
+    steps:
+      - name: Write inspection summary
+        env:
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.resolve-release.outputs.version }}
+        run: |
+          {
+            echo "## Draft release ready for inspection"
+            echo
+            echo "Release: $RELEASE_TAG"
+            echo
+            echo "The distributions are already on PyPI — PyPI has no draft state."
+            echo "Inspect, then publish or delete the draft GitHub release manually."
+            echo
+            echo "Inspect the draft release:"
+            echo
+            echo '```sh'
+            echo "gh release view $RELEASE_TAG --repo $GITHUB_REPOSITORY --json isDraft,body,createdAt"
+            echo '```'
+            echo
+            echo "Verify the published distributions against their provenance:"
+            echo
+            echo '```sh'
+            echo "workdir=\$(mktemp -d)"
+            echo "python3 -m pip download --no-deps --dest \"\$workdir\" \"template-pyinfra==${RELEASE_VERSION}\""
+            echo "gh attestation verify \"\$workdir/template_pyinfra-${RELEASE_VERSION}-py3-none-any.whl\" --repo \"$GITHUB_REPOSITORY\" --signer-workflow \"$GITHUB_REPOSITORY/.github/workflows/attest.yml\" --source-ref \"refs/tags/$RELEASE_TAG\" --deny-self-hosted-runners"
+            echo '```'
+            echo
+            echo "Install the published version:"
+            echo
+            echo '```sh'
+            echo "uv pip install \"template-pyinfra==${RELEASE_VERSION}\""
+            echo "python -c 'import template_pyinfra; from importlib.metadata import version; print(version(\"template-pyinfra\"))'"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,60 @@
+# Rehearse the publishable package on Release Please pull requests without
+# uploading it. The trigger stays broad and the gating lives in the job `if`, so
+# the `Package Release Dry Run` check context always reports on pull requests to
+# main (as skipped on ordinary ones) and can be marked required.
+
+name: Release Dry Run
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package-release-dry-run:
+    name: Package Release Dry Run
+    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.head_ref, 'release-please--') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup mise
+        uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4.2.4
+        with:
+          version: 2026.6.14
+          cache: true
+
+      # --no-sources builds what a consumer would resolve from an index, so any
+      # workspace/path source that leaked into pyproject.toml fails here.
+      - name: Build publishable distributions
+        run: uv build --no-sources --clear
+
+      # No --tag: the rehearsal only checks the distributions agree with each
+      # other, because the tag does not exist until the release PR is merged.
+      - name: Validate distribution metadata
+        run: python3 .github/scripts/validate_release.py
+
+      - name: Smoke test installed wheel
+        run: |
+          set -euo pipefail
+
+          wheel=$(find dist -maxdepth 1 -name '*.whl' -print -quit)
+          uv run --no-project --with "$wheel" -- \
+            python -c 'import template_pyinfra; from importlib.metadata import version; print(version("template-pyinfra"))'
+
+      - name: Rehearse registry upload
+        run: uv publish --dry-run dist/*

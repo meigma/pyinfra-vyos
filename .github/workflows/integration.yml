@@ -1,0 +1,55 @@
+name: Integration
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Separate from ci.yml because these tests drive the real pyinfra API against
+  # @local and write to the filesystem. No setup beyond the toolchain: git is
+  # preinstalled on GitHub-hosted runners, and every test works in its own
+  # throwaway repository under tmp_path.
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup mise
+        uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4.2.4
+        with:
+          version: 2026.6.14
+          cache: true
+          # Installs every tool from mise.toml honoring mise.lock (locked → fail
+          # closed), including moon, and prepends the shim dir to PATH.
+
+      - name: Resolve uv cache directory
+        id: uv-cache
+        run: echo "dir=$(uv cache dir)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache uv downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.uv-cache.outputs.dir }}
+          key: ${{ runner.os }}-uv-${{ hashFiles('uv.lock', 'docs/uv.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-uv-
+
+      - name: Run integration tests
+        run: moon run root:test-integration --summary minimal

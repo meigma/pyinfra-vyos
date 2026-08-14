@@ -1,0 +1,143 @@
+language: 'python'
+layer: 'library'
+stack: 'backend'
+
+project:
+  title: 'template-pyinfra'
+  description: 'Meigma pyinfra plugin repository template.'
+  owner: 'meigma'
+  maintainers:
+    - 'meigma'
+
+# Every task runs against `system` binaries that mise (mise.toml + mise.lock) puts
+# on PATH; moon manages no language toolchain itself.
+toolchains:
+  default: 'system'
+
+fileGroups:
+  pySources:
+    - 'src/**/*.py'
+    - 'tests/**/*.py'
+    - 'pyproject.toml'
+    - 'uv.lock'
+    - '.python-version'
+    # Tool/version pins. Under the `system` toolchain moon does not hash the
+    # Python or uv binary's version, so the mise pins are inputs here too —
+    # bumping a tool in mise must invalidate the cacheable build task.
+    - 'mise.toml'
+    - 'mise.lock'
+  packageSources:
+    - 'src/**/*'
+    - 'pyproject.toml'
+    - 'uv.lock'
+    - '.python-version'
+    - 'mise.toml'
+    - 'mise.lock'
+  scriptSources:
+    - '.github/scripts/**/*.py'
+    - 'pyproject.toml'
+    - 'uv.lock'
+    - '.python-version'
+    - 'mise.toml'
+    - 'mise.lock'
+
+workspace:
+  inheritedTasks:
+    include: []
+
+tasks:
+  lock:
+    command: 'uv lock --check'
+    inputs:
+      - 'pyproject.toml'
+      - 'uv.lock'
+    options:
+      cache: false
+
+  # `ruff format` does not reorder imports, so the import-sorting rule is
+  # checked here as well; `lint` covers it again as part of the full rule set.
+  format:
+    script: 'uv run --locked ruff format --check . && uv run --locked ruff check --select I .'
+    inputs:
+      - '@group(pySources)'
+      - '@group(scriptSources)'
+    options:
+      cache: false
+
+  format-fix:
+    script: 'uv run --locked ruff format . && uv run --locked ruff check --select I --fix .'
+    inputs:
+      - '@group(pySources)'
+      - '@group(scriptSources)'
+    options:
+      cache: false
+      runInCI: false
+
+  lint:
+    command: 'uv run --locked ruff check .'
+    inputs:
+      - '@group(pySources)'
+      - '@group(scriptSources)'
+    options:
+      cache: false
+
+  typecheck:
+    command: 'uv run --locked mypy'
+    inputs:
+      - '@group(pySources)'
+    options:
+      cache: false
+
+  test:
+    command: 'uv run --locked pytest'
+    inputs:
+      - '@group(pySources)'
+    options:
+      cache: false
+
+  # Tests for the repository automation scripts under .github/scripts. They live
+  # outside pytest's testpaths, so the path is passed explicitly.
+  scripts-test:
+    command: 'uv run --locked pytest .github/scripts'
+    inputs:
+      - '@group(scriptSources)'
+    options:
+      cache: false
+
+  build:
+    command: 'uv build'
+    inputs:
+      - '@group(packageSources)'
+    outputs:
+      - 'dist/template_pyinfra-*.tar.gz'
+      - 'dist/template_pyinfra-*.whl'
+
+  # Drives the real pyinfra API against @local and touches the filesystem. The
+  # dedicated integration workflow selects this task explicitly; ordinary CI
+  # selects root:check, which does not depend on it. runInCI must stay true or
+  # moon refuses to run the task inside a CI environment at all.
+  test-integration:
+    command: 'uv run --locked pytest --integration tests/integration'
+    inputs:
+      - '@group(pySources)'
+    options:
+      cache: false
+      runInCI: true
+
+  check:
+    deps:
+      - 'root:format'
+      - 'root:lint'
+      - 'root:lock'
+      - 'root:typecheck'
+      - 'root:test'
+      - 'root:build'
+      - 'root:scripts-test'
+      - 'docs:build'
+    inputs:
+      - '@group(pySources)'
+      - '@group(packageSources)'
+      - '@group(scriptSources)'
+    options:
+      cache: false
+      runInCI: true

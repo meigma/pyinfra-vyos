@@ -1,0 +1,77 @@
+[project]
+name = "template-pyinfra"
+version = "0.1.0"
+description = "Template repository for pyinfra plugin packages"
+readme = "README.md"
+authors = [
+    { name = "Joshua Gilman", email = "joshuagilman@gmail.com" }
+]
+# The interpreter pinned in .python-version is the development version; this
+# floor is deliberately lower so generated packages stay broadly installable.
+requires-python = ">=3.11"
+dependencies = [
+    "pyinfra>=3.9.2,<4",
+]
+
+# pyinfra discovers connectors through entry points; facts and operations are
+# ordinary importable modules and need no registration. Uncomment and adapt
+# only if this project grows a custom connector.
+# [project.entry-points.'pyinfra.connectors']
+# example = "template_pyinfra.connectors.example:ExampleConnector"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "mypy>=2.3.0",
+    "pytest>=9.1.1",
+    "ruff>=0.16.2",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: requires network/local tool access",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+# ruff formats Python code blocks inside Markdown. The agent-protocol documents
+# are maintained outside this project and must not be rewritten by `format-fix`.
+extend-exclude = [".session.md", "AGENTS.md", "CLAUDE.md"]
+
+[tool.ruff.lint]
+select = [
+    "B",   # bugbear: likely bugs and design traps
+    "E4",  # import and whitespace errors
+    "E7",  # statement errors
+    "E9",  # syntax and runtime errors
+    "F",   # pyflakes
+    "I",   # import sorting
+    "RUF", # Ruff-specific correctness rules
+    "SIM", # simplifications that improve clarity
+    "UP",  # modern Python syntax
+]
+
+[tool.ruff.format]
+docstring-code-format = true
+line-ending = "lf"
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src"]
+check_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_untyped_defs = true
+extra_checks = true
+no_implicit_optional = true
+pretty = true
+show_error_codes = true
+strict_equality = true
+warn_redundant_casts = true
+warn_unreachable = true
+warn_unused_configs = true
+warn_unused_ignores = true

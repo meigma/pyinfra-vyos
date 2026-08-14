@@ -1,0 +1,61 @@
+name: Security Scan
+
+# Weekly supply-chain review of the two things this repository actually ships:
+# the locked Python dependency graph and the workflows that build and publish it.
+# Both jobs report through GitHub code scanning so findings land in the Security
+# tab instead of only in a scheduled run's logs.
+
+on:
+  schedule:
+    - cron: "37 9 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # OSV-Scanner is consumed through its maintainer-provided reusable workflow
+  # rather than the underlying container action: the action's own documentation
+  # states its behavior can change in a patch release and that callers should
+  # use the reusable workflow. The workflow reference is pinned to the v2.5.0
+  # commit, which in turn pins the scanner image and the SARIF upload it runs.
+  dependency-vulnerability-scan:
+    name: Dependency Vulnerability Scan
+    permissions:
+      # Required by github/codeql-action/upload-sarif inside the called workflow.
+      actions: read
+      contents: read
+      security-events: write
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@8deb546fdb875b9996d27d4950be7312dac076a1 # v2.5.0
+    with:
+      # Scan the committed lockfiles rather than the whole tree: they are the
+      # complete, resolved dependency set for the package and the docs site.
+      scan-args: |-
+        --lockfile=uv.lock
+        --lockfile=docs/uv.lock
+
+  workflow-lint:
+    name: Workflow Security Lint
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # zizmor ships an official action; it is pinned by commit and the `version`
+      # input pins the zizmor release it installs, so neither the action nor the
+      # analyzer can move without a Dependabot pull request. The action uploads
+      # its own SARIF when advanced-security is enabled.
+      - name: Audit workflows with zizmor
+        uses: zizmorcore/zizmor-action@3dc1ecc9bcb9e94e9b2c709687979e1298497054 # v0.6.2
+        with:
+          version: 1.29.0
+          inputs: .github/workflows
+          advanced-security: true

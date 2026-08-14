@@ -1,0 +1,68 @@
+# Moon
+.moon/cache/
+.moon/docker/
+
+# Agent/runtime state.
+#
+# The session tooling keeps mutable state next to its skills, so the directories
+# are ignored wholesale and the skill definitions are re-included by negation.
+# Git will not descend into an excluded directory, so each parent is excluded
+# with `dir/*` (not `dir/`) to keep the negation reachable.
+# `.claude/skills` is a relative symlink to `.agents/skills`.
+.agents/*
+!.agents/skills/
+.claude/*
+!.claude/skills
+
+# Session journals. Anchored to the repository root so the seed journal shipped
+# in scaffold/.journal/ stays tracked.
+/.journal/
+
+# Worktrunk worktrees
+/.wt/
+
+# Environment
+.env
+.env.*
+.envrc
+
+# mise local overrides (per-developer tool/env overrides; never committed).
+# mise.toml and mise.lock ARE committed.
+mise.local.toml
+.mise.local.toml
+
+# Python.
+# .python-version IS committed: it pins the interpreter for this project and for
+# the docs project, and uv reads it when creating environments.
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.tox/
+.nox/
+htmlcov/
+.coverage
+.coverage.*
+dist/
+build/
+site/
+*.egg-info/
+.eggs/
+
+# Docs site outputs
+docs/build/
+docs/.venv/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
