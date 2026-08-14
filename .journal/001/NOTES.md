@@ -29,3 +29,9 @@ Locked first wave:
 Demoted to second wave: all typed ops (generic `configuration` scoped diff, system_basics, interfaces, static_routes, firewall_groups, firewall_rules, nat_rules, users) plus previous second-wave list.
 Residual risks accepted (inherent to current workflow too): bad load can sever SSH mid-apply (mitigated by commit-without-save + verify), multi-component partial commit.
 Next: template first-setup (rename to pyinfra-vyos, placeholders, relock), then implement first wave in place of sample git-config domain.
+
+## 2026-08-14 14:54 — Correction: library boundary (user decision)
+Correction to the 14:50 entry: pyinfra-vyos is a generalized library, NOT an import of the lab repo's wholesale flow. The lab workflow informed the op design but its orchestration stays out.
+- In library: `config_load` (pre-rendered src path/content, upload, load+compare, noop/commit, optional save flag), facts (Version, Configuration, ConfigurationCommands), session substrate. No opinions on config origin.
+- Out of library (caller's bespoke deploy code): SOPS/secret injection, config templating/rendering, backup policy (caller reads fact and writes file), connectivity-verify-then-save orchestration, inventory/keys.
+Analogy: vyos.vyos collection doesn't know about SOPS either; playbooks compose it. Matches template intent: "custom facts and operations for other people's deploys to import."
