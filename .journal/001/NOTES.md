@@ -79,3 +79,6 @@ Two library bugs found ONLY by real hardware (fixed in PR #6, 61dd3fb):
 2. strip-private op pipe: `\|` argv is rejected by non-interactive `run` (Invalid command: [|]); real form is a shell pipeline through /usr/libexec/vyos/strip-private.py with pipefail (verified redacting on-device). ARCHITECTURE §3 table amended.
 Verification: appliance tier 4/4 PASSED against the Lima VM (facts + config_load changed→noop→save cycle on VyOS 2026.03 circinus); root:check + test-integration green; real `show version` fixture captured (backlog item satisfied).
 Next: PR #6 awaiting human approval; lab VM left running (pyinfra-vyos Lima instance).
+
+## 2026-08-15 12:39 — PR #6 merged; lab VM torn down
+User approved; squash-merged as `test: add lima-powered vyos appliance lab` (5973734). Lima instance deleted via `vyos-lab down` (qcow2 cache kept in ~/.cache/pyinfra-vyos for instant re-up). Worktree removed. All backlog items closed; wave 1 fully shipped and hardware-verified.
