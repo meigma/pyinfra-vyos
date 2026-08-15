@@ -29,8 +29,8 @@ from pyinfra_vyos.facts import Configuration, ConfigurationCommands, Version
 from pyinfra_vyos.operations import config_load
 
 __all__ = [
-    "Version",
     "Configuration",
     "ConfigurationCommands",
+    "Version",
     "config_load",
 ]

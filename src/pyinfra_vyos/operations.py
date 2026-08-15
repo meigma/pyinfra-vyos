@@ -79,13 +79,10 @@ def _validate_src(src: str | IO[Any]) -> str | IO[Any]:
     if isinstance(src, str):
         path = _resolve_put_path(src)
         try:
-            fileobj: IO[Any] = open(path, "rb")
+            with open(path, "rb") as fileobj:
+                _require_nonempty(fileobj, src=path)
         except OSError as error:
-            raise _SourceError(f"No such file: {path}") from error
-        try:
-            _require_nonempty(fileobj, src=path)
-        finally:
-            fileobj.close()
+            raise _SourceError(f"cannot read src: {path}") from error
         return path
 
     if not hasattr(src, "read"):

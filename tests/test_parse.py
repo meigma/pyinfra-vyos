@@ -76,9 +76,7 @@ SHOW_VERSION_MISSING_OPTIONAL = [
     "Copyright:        VyOS maintainers and contributors",
 ]
 
-CONFIG_JSON_VALID = (
-    '{"system": {"host-name": "gateway", "login": {"user": {"vyos": {}}}}}'
-)
+CONFIG_JSON_VALID = '{"system": {"host-name": "gateway", "login": {"user": {"vyos": {}}}}}'
 CONFIG_JSON_NON_DICT = '["system", "host-name"]'
 CONFIG_JSON_INVALID = '{"system":'
 

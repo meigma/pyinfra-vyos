@@ -105,8 +105,7 @@ def parse_config_json(text: str) -> dict[str, Any]:
         raise ParseError(f"configuration JSON is not valid: {error}") from error
     if not isinstance(loaded, dict):
         raise ParseError(
-            "configuration JSON must be a top-level object, "
-            f"got {type(loaded).__name__}",
+            f"configuration JSON must be a top-level object, got {type(loaded).__name__}",
         )
     return loaded
 

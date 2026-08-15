@@ -15,7 +15,7 @@ from pyinfra.context import ctx_state
 import pyinfra_vyos
 from pyinfra_vyos._cli import sg_probe, sg_vbash_run
 from pyinfra_vyos._session import SENTINEL_CHANGED
-from pyinfra_vyos.operations import _SourceError, _guarded, config_load
+from pyinfra_vyos.operations import _guarded, _SourceError, config_load
 
 _VALID_CONFIG = "set system host-name pyinfra-vyos\n"
 _WHITESPACE_ONLY = "  \n\t\n  "
@@ -77,9 +77,9 @@ def test_config_load_is_marked_not_idempotent() -> None:
 
 def test_package_exports_the_wave1_primitives() -> None:
     assert pyinfra_vyos.__all__ == [
-        "Version",
         "Configuration",
         "ConfigurationCommands",
+        "Version",
         "config_load",
     ]
     for exported in pyinfra_vyos.__all__:
@@ -89,7 +89,7 @@ def test_package_exports_the_wave1_primitives() -> None:
 def test_nonexistent_path_is_rejected(tmp_path: Path) -> None:
     missing = tmp_path / "missing.conf"
 
-    with pytest.raises(OperationValueError, match="No such file"):
+    with pytest.raises(OperationValueError, match="cannot read src"):
         _yielded(str(missing))
 
 
