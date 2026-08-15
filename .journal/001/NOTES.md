@@ -85,3 +85,6 @@ User approved; squash-merged as `test: add lima-powered vyos appliance lab` (597
 
 ## 2026-08-15 12:43 — Wave-2 research persisted
 User asked where wave-2 intent lives; the full cited research report (prioritized ops/facts with feasibility, next-wave/constrained/skip lists, 1.4/1.5 drift notes) existed only as a session artifact. Copied to `.journal/001/RESEARCH.md` with a header noting wave-1 shipped and the two on-hardware corrections (strip-private pipe, hw-id pinning). Wave-2 map now durable: RESEARCH.md (what+why) + ARCHITECTURE.md §5 (how it bolts on).
+
+## 2026-08-15 12:45 — Close
+Session closed. All work landed: PRs #1–#6 squash-merged to main (a464a6f…5973734 lineage, final main tip 5973734 + licensing d1949e4); local main fast-forwarded; implementation worktrees removed; no journal contamination (`git ls-files .journal` empty on main). Release Please PR #7 (0.1.0) left open for the human release decision. SUMMARY.md written; INDEX.md row set to complete; TECH_NOTES.md seeded with the durable VyOS scripting landmines, test-tier entry points, and release-path map. Hand-off: wave 2 starts from `.journal/001/RESEARCH.md` + ARCHITECTURE.md §5.
