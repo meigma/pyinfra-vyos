@@ -1,77 +1,221 @@
 ---
 title: pyinfra-vyos
 slug: /
-description: Starting point for Meigma pyinfra plugin packages.
+description: pyinfra facts and whole-config load for VyOS over SSH.
 ---
 
 # pyinfra-vyos
 
-This repository is the starting point for Meigma [pyinfra](https://pyinfra.com)
-plugin packages: distributable Python packages that add custom facts and
-operations to a pyinfra deploy.
+`pyinfra-vyos` is a [pyinfra](https://pyinfra.com) plugin: facts plus a
+whole-config `config_load` operation for VyOS over SSH. Store a complete
+device config in git and load it as one unit, rather than issuing
+incremental `set` commands from the controller.
 
-Create a repository from it on GitHub with **Use this template**, then work
-through `DELETE_ME.md` in the generated repository.
+Requires Python 3.11+ and pyinfra 3.9.2+. Targets need `vbash` and the VyOS
+script-template substrate; `config_load` additionally needs the connecting
+user to be able to `sg` into the `vyattacfg` group. Nothing is installed
+on the appliance.
 
-## What the template provides
+## Install
 
-**A working plugin package.** `src/pyinfra_vyos/` ships sample primitives
-built around `git config`: facts that read repository configuration, an
-idempotent operation that converges a single key, and a pure domain module the
-two share. The public surface is `facts.py` and `operations.py`; everything
-else is private and meant to be gutted. The sample is deliberately small and
-runnable anywhere `git` is installed, so the integration tests exercise the
-real pyinfra API rather than mocks.
+The first PyPI release is pending. Until then, install from the repository:
 
-Consumers import from the package the same way they import pyinfra's own
-primitives:
-
-```python
-from pyinfra_vyos.operations import config_entry
-
-config_entry(key="user.email", value="dev@example.com")
+```sh
+pip install git+https://github.com/meigma/pyinfra-vyos
 ```
 
-**A pinned toolchain.** [mise](https://mise.jdx.dev) pins Python, `uv`, and
-`moon` with a committed lockfile and fail-closed installs. [uv](https://docs.astral.sh/uv/)
-manages dependencies through a committed `uv.lock`, and every task runs with
-`--locked`. [moon](https://moonrepo.dev) is the single entrypoint: `format`,
-`lint`, `lock`, `typecheck`, `test`, `build`, and `scripts-test` all roll up
-into `root:check`, which is what CI runs.
+After the first release:
 
-**A release pipeline.** [release-please](https://github.com/googleapis/release-please)
-turns Conventional Commits into a release PR and a draft GitHub release;
-tagging publishes to PyPI through trusted publishing, with build provenance
-attested via GitHub artifact attestations. A dry-run workflow rehearses the
-whole path on every release PR, so the first real release is not the first
-time the pipeline runs.
+```sh
+pip install pyinfra-vyos
+```
 
-**Hardened CI.** Every workflow declares `permissions: {}` at the top level and
-grants scopes per job, pins actions by commit SHA, and checks out without
-persisted credentials. Repository settings, branch rulesets, and Dependabot
-configuration live in the repository as code.
+With [uv](https://docs.astral.sh/uv/):
 
-**This documentation site.** MkDocs Material, built by `moon run docs:build`
-and deployed to GitHub Pages on every push to `main`.
+```sh
+uv add pyinfra-vyos
+```
 
 ## Quickstart
 
-```bash
-git clone https://github.com/meigma/pyinfra-vyos.git
-cd pyinfra-vyos
-mise install       # Python, uv, and moon at their pinned versions
-moon run root:check # format, lint, types, tests, build, docs
+Inventory is ordinary pyinfra SSH:
+
+```python
+# inventory.py
+hosts = [("vyos.example.net", {"ssh_user": "vyos"})]
 ```
 
-To preview this site locally, run `moon run docs:serve` and open
-<http://127.0.0.1:8000>.
+The three facts wrap op-mode `show` commands. `config_load` uploads a
+controller-local file and runs one configure / load / commit session.
 
-## Where to go next
+```python
+# facts.py
+from pyinfra import host
+
+from pyinfra_vyos import Configuration, ConfigurationCommands, Version
+
+version = host.get_fact(Version)
+tree = host.get_fact(Configuration)
+commands = host.get_fact(ConfigurationCommands)
+redacted = host.get_fact(ConfigurationCommands, strip_private=True)
+```
+
+```sh
+pyinfra inventory.py facts.py
+```
+
+`Configuration` and unredacted `ConfigurationCommands` are secret-bearing.
+`strip_private=True` is a VyOS op-pipe redaction; that output is not
+restore-faithful and must not be used as a backup.
+
+### Commit, verify, then save
+
+A bad full config can sever SSH. The canonical pattern is two deploys with
+an external check in between: commit without writing `/config/config.boot`,
+verify reachability and facts, then load again with `save=True`.
+
+`src` should be a footer-bearing config (`// vyos-config-version`). Use a
+`/config/config.boot`-style source (or `save <file>` output). Bare
+`show configuration` output has no footer; VyOS `load` treats that as
+version 0 and runs the full migration chain.
+
+```python
+# deploy_commit.py
+from pyinfra_vyos import config_load
+
+config_load("configs/edge.conf")  # save=False
+```
+
+```python
+# deploy_save.py
+from pyinfra_vyos import config_load
+
+config_load("configs/edge.conf", save=True)
+```
+
+```sh
+pyinfra inventory.py deploy_commit.py
+# verify SSH reachability and re-gather facts
+pyinfra inventory.py facts.py
+pyinfra inventory.py deploy_save.py
+```
+
+`save` is keyword-only. `config_load(src, True)` is not a valid call.
+
+## Contracts
+
+These are user-facing, not internals:
+
+1. **Serialize `config_load` per host.** The caller must run at most one
+   mutation session at a time against a given device, including concurrent
+   runs from the same controller. Overlapping mutations are out of contract.
+   VyOS has no documented session lock; this package does not invent one.
+2. **Treat controller logs as sensitive.** Config output and facts
+   (`Configuration`, unredacted `ConfigurationCommands`) can reach returned
+   fact values, verbose fact output, failed-fact combined output, and
+   operation failure diagnostics. The library cannot enforce "never log".
+3. **Supply a footer-bearing config.** Callers should ship a file that
+   includes `// vyos-config-version` — the same footer `/config/config.boot`
+   carries. The library does not detect or inject it.
+4. **pyinfra always reports the op changed.** `config_load` is marked
+   `is_idempotent=False`: the executed command list is nonempty, so
+   pyinfra's change flag is pessimistic. Device sentinels in operation
+   stdout (`PYINFRA_VYOS changed` or `PYINFRA_VYOS noop`) are the truthful
+   answer. A save-only run (no candidate diff, boot file still written)
+   reports `changed` via the sentinel, never `noop`.
+
+## Fact reference
+
+All three facts run through `vbash` + script-template `run`.
+`requires_command` returns `"vbash"` as a **binary-presence gate only**.
+Hosts without `vbash` yield `default()` instead of failing. The gate does
+not establish that the host is a VyOS appliance or that op-mode commands
+are compatible.
+
+| Fact | Op-mode | Arguments | `default()` |
+| --- | --- | --- | --- |
+| `Version` | `show version` | none | `{}` |
+| `Configuration` | `show configuration json` | none | `{}` |
+| `ConfigurationCommands` | `show configuration commands` | `strip_private: bool = False` | `[]` |
+
+- **`Version`** — label-to-value mapping from `show version`. Labels are
+  lowercased with spaces turned into underscores. The `version` field is
+  required; unknown labels and missing optionals are kept or omitted as
+  the parser produces them.
+- **`Configuration`** — the running configuration as the raw JSON tree.
+  No key or value normalization. Secret-bearing.
+- **`ConfigurationCommands`** — device-rendered set-form lines, nonempty
+  lines kept as-is. When `strip_private` is true, the VyOS op-pipe tokens
+  `\|` and `strip-private` are appended as ordinary argv — a VyOS op pipe,
+  not a shell pipeline. Unredacted output is secret-bearing.
+  `strip_private` output is **not restore-faithful** and must not be used
+  as a backup.
+
+```python
+from pyinfra_vyos.facts import Configuration, ConfigurationCommands, Version
+from pyinfra_vyos.operations import config_load
+```
+
+The same names are re-exported from `pyinfra_vyos`.
+
+`config_load(src, *, save=False)` takes a controller-local path (`str`) or
+a readable, seekable file-like object. A `str` is resolved against the
+deploy directory with the same rule pyinfra `files.put` uses.
+
+## Operator risks
+
+- **Stranded staging residual.** Each `config_load` uses a high-entropy
+  directory `/tmp/pyinfra-vyos-<token>/` (mode 0700; files 0600). If a
+  yielded command fails before the session runs — an upload, a chmod, the
+  remote non-whitespace guard — or the SSH connector is lost, that
+  directory is left behind. Paths that reach session execution are cleaned
+  up by the EXIT trap and the trailing `rm`. `/tmp` may be tmpfs; a large
+  config can hit capacity.
+- **Changed vs device-noop.** pyinfra always reports `config_load` as
+  changed because the executed command list is nonempty. Read the device
+  sentinels (`PYINFRA_VYOS changed` / `PYINFRA_VYOS noop`) in operation
+  stdout for the truthful result. A save-only run reports `changed` via
+  the sentinel, never `noop`.
+- **Severed SSH.** Loading a bad whole config can drop management access.
+  This package does not implement commit-confirm. Use the
+  commit-verify-save pattern: `config_load(src)` (`save=False`), verify
+  reachability and facts, then `config_load(src, save=True)`.
+
+## Testing
+
+**Unit** is the default, mock-free tier: rendered commands, fact
+`process()` over literal output, and pure domain functions.
+
+```sh
+moon run root:test
+```
+
+**Integration** (`--integration`) drives the real pyinfra API against
+`@local`. It covers prepare-phase rendering and graceful degradation
+(facts without `vbash` return `default()`). It does not talk to a VyOS
+device.
+
+```sh
+moon run root:test-integration
+```
+
+**Appliance** is opt-in and not wired into CI. It mutates a live VyOS
+host (load / commit / save, then restore from `/config/config.boot`).
+Run it only against a **dedicated lab device**, never production. Both
+`--appliance` and `PYINFRA_VYOS_TEST_HOST` are required:
+
+```sh
+export PYINFRA_VYOS_TEST_HOST=vyos-lab.example.net
+# optional: PYINFRA_VYOS_TEST_USER, PYINFRA_VYOS_TEST_PORT, PYINFRA_VYOS_TEST_KEY
+# optional: PYINFRA_VYOS_TEST_CAPTURE_DIR (captured `show version` fixture)
+uv run --locked pytest --appliance tests/integration
+```
+
+`root:check` runs the unit tier only. The `@local` integration tier has
+its own CI workflow.
+
+## Source
 
 - [Source on GitHub](https://github.com/meigma/pyinfra-vyos)
-- [pyinfra documentation](https://docs.pyinfra.com) — the API these primitives
-  extend
-
-Generated projects should replace this page with project-specific
-documentation: what the package does, how to install it, and a reference for
-each fact and operation it exports.
+- [pyinfra documentation](https://docs.pyinfra.com) — the API these
+  primitives extend
