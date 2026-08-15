@@ -2,74 +2,59 @@ from __future__ import annotations
 
 import inspect
 
-import pytest
 from pyinfra.api.arguments import all_argument_meta
 
 import pyinfra_vyos
 from pyinfra_vyos import operations
-from pyinfra_vyos._cli import CommandError, QuoteString, git_command
+from pyinfra_vyos._cli import sg_probe, sg_vbash_run, vyos_op_command
 
 
-def test_git_command_quotes_user_values() -> None:
-    command = git_command("config", "--local", "--replace-all", QuoteString("user.name"))
+def test_vyos_op_command_wraps_argv_in_one_run_and_chains_the_marker() -> None:
+    command = vyos_op_command("show", "version", marker="PYINFRA_VYOS")
+    rendered = command.get_raw_value()
 
-    assert str(command) == "git config --local --replace-all user.name"
+    assert rendered == (
+        "vbash -c 'source /opt/vyatta/etc/functions/script-template; "
+        "run show version && printf '\\''\\n%s\\n'\\'' PYINFRA_VYOS'"
+    )
+    assert rendered.count(" run ") == 1
 
 
-def test_git_command_quotes_values_containing_spaces() -> None:
-    command = git_command(
-        "config",
-        "--local",
-        "--replace-all",
-        QuoteString("user.name"),
-        QuoteString("Ada Lovelace"),
+def test_vyos_op_command_renders_op_pipe_tokens_literally() -> None:
+    """``\\|`` ``strip-private`` is a VyOS op pipe, not a shell pipeline."""
+
+    command = vyos_op_command(
+        "show",
+        "configuration",
+        "commands",
+        r"\|",
+        "strip-private",
+        marker="PYINFRA_VYOS",
     )
 
-    assert command.get_raw_value() == "git config --local --replace-all user.name 'Ada Lovelace'"
+    assert command.get_raw_value() == (
+        "vbash -c 'source /opt/vyatta/etc/functions/script-template; "
+        "run show configuration commands \\| strip-private && "
+        "printf '\\''\\n%s\\n'\\'' PYINFRA_VYOS'"
+    )
 
 
-def test_git_command_scopes_to_a_repository_before_the_subcommand() -> None:
-    """``-C`` is a top-level git option and is ignored after the subcommand."""
+def test_sg_probe_closes_stdin_and_checks_the_substrate() -> None:
+    command = sg_probe()
 
-    command = git_command("config", "--local", "--list", "--null", path="/srv/my repo")
-
-    assert command.get_raw_value() == "git -C '/srv/my repo' config --local --list --null"
-
-
-@pytest.mark.parametrize("value", ["--global", "--system", "-e", "-"])
-def test_git_command_rejects_option_lookalike_values(value: str) -> None:
-    """Shell quoting does not stop git from parsing a quoted token as an option.
-
-    ``git config --local user.name '--global'`` re-scopes the command rather
-    than setting a value, so every user-supplied argv value beginning with
-    ``-`` is rejected before a command is built.
-    """
-
-    with pytest.raises(CommandError, match="command-line option"):
-        git_command("config", "--local", QuoteString(value))
-    with pytest.raises(CommandError, match="command-line option"):
-        git_command("config", "--local", "--list", path=value)
+    assert command.get_raw_value() == (
+        "sg vyattacfg -c 'test -x /bin/vbash && "
+        "test -r /opt/vyatta/etc/functions/script-template' </dev/null"
+    )
 
 
-def test_git_command_keeps_package_chosen_flags() -> None:
-    command = git_command("config", "--local", "--unset-all", QuoteString("user.name"))
+def test_sg_vbash_run_quotes_a_staging_path_containing_a_space() -> None:
+    command = sg_vbash_run("/tmp/my staging/session.sh", "/tmp/my staging")
 
-    assert command.get_raw_value() == "git config --local --unset-all user.name"
-
-
-def test_git_command_passes_stdin_through_to_pyinfra() -> None:
-    """Values that must stay off the process table travel on standard input."""
-
-    command = git_command("hash-object", "-w", "--stdin", stdin="payload")
-
-    assert command.get_raw_value() == "git hash-object -w --stdin"
-    assert command.connector_arguments["_stdin"] == "payload"
-
-
-def test_git_command_masks_nothing_by_default() -> None:
-    command = git_command("--version")
-
-    assert command.get_masked_value() == command.get_raw_value() == "git --version"
+    assert command.get_raw_value() == (
+        "sg vyattacfg -c \"/bin/vbash '/tmp/my staging/session.sh'\" "
+        "</dev/null; rc=$?; rm -rf '/tmp/my staging'; exit $rc"
+    )
 
 
 def test_no_operation_parameter_collides_with_pyinfra_reserved_arguments() -> None:
