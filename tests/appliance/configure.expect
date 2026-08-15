@@ -1,0 +1,58 @@
+#!/usr/bin/expect -f
+# First boot of the installed VyOS disk: configure DHCP, SSH, and the Lima
+# public key on the `vyos` user, then save and power off.
+# argv: <ssh-ed25519 key base64> <vyos password> <qemu command...>
+
+set timeout 1500
+log_user 1
+
+set key_b64 [lindex $argv 0]
+set password [lindex $argv 1]
+set qemu_cmd [lrange $argv 2 end]
+spawn {*}$qemu_cmd
+
+set logged_in 0
+while {!$logged_in} {
+    expect {
+        -re {vyos login: $} { sleep 1; send -- "vyos\r" }
+        -re {Password: $}   { sleep 1; send -- "$password\r" }
+        -re {\$ $}          { set logged_in 1 }
+        eof     { puts stderr "qemu exited during login"; exit 1 }
+        timeout { puts stderr "timeout waiting for login"; exit 1 }
+    }
+}
+
+proc run {cmd} {
+    send -- "$cmd\r"
+    expect {
+        -re {[#\$] $} { }
+        eof     { puts stderr "qemu exited running: $cmd"; exit 1 }
+        timeout { puts stderr "timeout running: $cmd"; exit 1 }
+    }
+}
+
+run "configure"
+run "set interfaces ethernet eth0 address dhcp"
+run "set service ssh port 22"
+run "set system login user vyos authentication public-keys lima type ssh-ed25519"
+run "set system login user vyos authentication public-keys lima key $key_b64"
+send -- "commit\r"
+expect {
+    -re {[Ff]ailed|[Ee]rror} { puts stderr "commit failed"; exit 1 }
+    -re {# $} { }
+    eof     { puts stderr "qemu exited during commit"; exit 1 }
+    timeout { puts stderr "timeout waiting for commit"; exit 1 }
+}
+run "save"
+run "exit"
+# Commit pins the build VM's NIC MAC as `hw-id`; Lima assigns a different
+# per-instance MAC, and the mismatch makes the boot config fail to load
+# (observed: "vyos-config: Configuration error", SSH never comes up).
+# Strip the binding so the image boots under any MAC.
+run "sudo sed -i '/hw-id/d' /config/config.boot"
+send -- "poweroff now\r"
+expect {
+    -re {\[y/N\] ?$} { send -- "y\r"; exp_continue }
+    eof { exit 0 }
+    timeout { puts stderr "timeout waiting for poweroff"; exit 1 }
+}

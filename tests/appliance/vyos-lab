@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# Lima-powered VyOS appliance lab for the pyinfra-vyos `--appliance` tier.
+#
+#   tests/appliance/vyos-lab build   build (or reuse) the qcow2 image
+#   tests/appliance/vyos-lab up      build if needed, start the Lima VM
+#   tests/appliance/vyos-lab env     print PYINFRA_VYOS_TEST_* exports
+#   tests/appliance/vyos-lab test    up + run the appliance pytest tier
+#   tests/appliance/vyos-lab down    stop and delete the Lima VM
+#
+# The VM runs x86_64 VyOS under emulation on Apple Silicon: startup takes
+# minutes, not seconds. The instance is disposable; the built image is cached
+# under ~/.cache/pyinfra-vyos and reused.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$HERE/../.." && pwd)"
+CACHE_DIR="${PYINFRA_VYOS_CACHE:-$HOME/.cache/pyinfra-vyos}"
+VYOS_VERSION="2026.03"
+IMAGE_PATH="$CACHE_DIR/vyos-${VYOS_VERSION}-lab.qcow2"
+INSTANCE="pyinfra-vyos"
+LIMA_HOME="${LIMA_HOME:-$HOME/.lima}"
+LIMA_KEY="$LIMA_HOME/_config/user"
+SSH_PORT=60022
+
+log() { printf '>>> %s\n' "$*" >&2; }
+die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+command -v limactl >/dev/null || die "limactl not found (brew install lima)"
+
+build() { "$HERE/build-image.sh"; }
+
+ssh_ready() {
+  ssh -p "$SSH_PORT" -i "$LIMA_KEY" \
+    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    -o ConnectTimeout=5 -o BatchMode=yes \
+    vyos@127.0.0.1 true >/dev/null 2>&1
+}
+
+up() {
+  build
+  local state
+  state="$(limactl list --format '{{.Name}} {{.Status}}' 2>/dev/null | awk -v n="$INSTANCE" '$1==n {print $2}')"
+  if [[ "$state" != Running ]]; then
+    log "starting Lima instance $INSTANCE (emulated boot: allow ~10 minutes)"
+    if [[ -z "$state" ]]; then
+      local rendered="$CACHE_DIR/lima-vyos.yaml"
+      sed "s|__IMAGE__|file://$IMAGE_PATH|" "$HERE/lima-vyos.yaml.in" > "$rendered"
+      limactl start --name="$INSTANCE" --tty=false --timeout=2m "$rendered" || true
+    else
+      limactl start --tty=false --timeout=2m "$INSTANCE" || true
+    fi
+  fi
+  # VyOS cannot run Lima's cloud-init boot scripts, so `limactl start` always
+  # times out on its final readiness requirement even though the guest is
+  # healthy. The harness's readiness signal is SSH itself.
+  log "waiting for SSH on 127.0.0.1:$SSH_PORT"
+  for _ in $(seq 90); do
+    if ssh_ready; then
+      log "appliance is up"
+      return
+    fi
+    sleep 10
+  done
+  die "SSH never became ready; see \$LIMA_HOME/$INSTANCE/serial.log"
+}
+
+env_exports() {
+  cat <<EOF
+export PYINFRA_VYOS_TEST_HOST=127.0.0.1
+export PYINFRA_VYOS_TEST_PORT=$SSH_PORT
+export PYINFRA_VYOS_TEST_USER=vyos
+export PYINFRA_VYOS_TEST_KEY=$LIMA_HOME/_config/user
+EOF
+}
+
+run_tests() {
+  up
+  log "running appliance tier"
+  (
+    cd "$REPO_ROOT"
+    PYINFRA_VYOS_TEST_HOST=127.0.0.1 \
+    PYINFRA_VYOS_TEST_PORT=$SSH_PORT \
+    PYINFRA_VYOS_TEST_USER=vyos \
+    PYINFRA_VYOS_TEST_KEY="$LIMA_HOME/_config/user" \
+      uv run --locked pytest tests/integration --appliance -v "$@"
+  )
+}
+
+down() {
+  limactl stop -f "$INSTANCE" 2>/dev/null || true
+  limactl delete "$INSTANCE" 2>/dev/null || true
+  log "instance $INSTANCE removed (image cache kept)"
+}
+
+case "${1:-}" in
+  build) build ;;
+  up) up ;;
+  env) env_exports ;;
+  test) shift; run_tests "$@" ;;
+  down) down ;;
+  *) sed -n '2,9p' "$0"; exit 2 ;;
+esac

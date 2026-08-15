@@ -1,0 +1,66 @@
+#!/usr/bin/expect -f
+# Drive the VyOS live-ISO `install image` flow over the QEMU serial console.
+# argv: the qemu command line to spawn.
+#
+# Patterns are anchored to prompt tails ("vyos login: " at buffer end) so
+# boot-time kernel/systemd noise containing similar words cannot trigger a
+# premature send. The installer prompt loop answers defaults everywhere
+# except: serial console choice, destructive-install confirmations, and the
+# vyos password (kept at the live default "vyos").
+
+set timeout 1500
+log_user 1
+
+set qemu_cmd [lrange $argv 0 end]
+spawn {*}$qemu_cmd
+
+# No GRUB interaction: the ISO's default entry boots with a serial getty
+# (observed: "Welcome to VyOS - vyos ttyS0" without any menu selection), so
+# the menu can simply time out.
+
+# Live-system login. getty may redraw the prompt; keep answering until the
+# shell prompt appears.
+set logged_in 0
+while {!$logged_in} {
+    expect {
+        -re {vyos login: $} { sleep 1; send -- "vyos\r" }
+        -re {Password: $}   { sleep 1; send -- "vyos\r" }
+        -re {\$ $}          { set logged_in 1 }
+        eof     { puts stderr "qemu exited during live login"; exit 1 }
+        timeout { puts stderr "timeout waiting for live login"; exit 1 }
+    }
+}
+
+send -- "install image\r"
+
+# Installer prompt loop, grounded in vyos-1x circinus image_installer.py +
+# vyos/utils/io.py: ask_input renders "<question> (Default: <d>) " (tail is
+# ") "), ask_yes_no renders "[y/N] "/"[Y/n] ", getpass password prompts end
+# ": ". No bare ":"/")" fallbacks: informational lines ("The following
+# disks were found:") end the buffer with ":" while the installer is NOT
+# reading, and a queued stray newline then answers the next real prompt
+# with its default (observed: it declined the destructive-install confirm).
+set done 0
+while {!$done} {
+    expect {
+        -re {console should be used[^\r\n]*\) ?$} { send -- "S\r" }
+        -re {[Pp]assword[^\r\n]*: ?$}       { send -- "vyos\r" }
+        -re {\[y/N\] ?$}                    { send -- "y\r" }
+        -re {\[Y/n\] ?$}                    { send -- "\r" }
+        -re {image installed successfully|[Ii]nstallation finished} { set done 1 }
+        -re {\(Default: [^)\r\n]*\) ?$}     { send -- "\r" }
+        eof     { puts stderr "qemu exited during install"; exit 1 }
+        timeout { puts stderr "timeout during install prompts"; exit 1 }
+    }
+}
+
+expect {
+    -re {\$ $} { }
+    timeout { puts stderr "timeout waiting for post-install shell"; exit 1 }
+}
+send -- "poweroff now\r"
+expect {
+    -re {\[y/N\] ?$} { send -- "y\r"; exp_continue }
+    eof { exit 0 }
+    timeout { puts stderr "timeout waiting for poweroff"; exit 1 }
+}
