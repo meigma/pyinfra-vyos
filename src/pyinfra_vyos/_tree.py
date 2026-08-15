@@ -28,6 +28,7 @@ from __future__ import annotations
 from typing import Any
 
 __all__ = [
+    "Node",
     "TreeError",
     "diff_tree",
     "normalize_tree",
@@ -63,6 +64,27 @@ def validate_path(path: object) -> list[str]:
     return [_require_token(token, what="path token") for token in path]
 
 
+def _normalize_value(raw_value: object, *, strict: bool, where: str) -> Node:
+    """Normalize one node: a subtree mapping or a ``list[str]`` leaf."""
+
+    if isinstance(raw_value, dict):
+        return normalize_tree(raw_value, strict=strict, _where=where)
+    if isinstance(raw_value, list):
+        if strict:
+            return [_require_token(item, what=f"{where} value") for item in raw_value]
+        return [item if isinstance(item, str) else str(item) for item in raw_value]
+    if isinstance(raw_value, str):
+        if strict:
+            _require_token(raw_value, what=f"{where} value")
+        return [raw_value]
+    if strict:
+        raise TreeError(
+            f"{where} must be a mapping, string, or list of strings, "
+            f"got {type(raw_value).__name__}: {raw_value!r}"
+        )
+    return [str(raw_value)]
+
+
 def normalize_tree(values: object, *, strict: bool, _where: str = "values") -> dict[str, Node]:
     """Normalize a config tree into ``dict`` nodes with ``list[str]`` leaves.
 
@@ -81,39 +103,17 @@ def normalize_tree(values: object, *, strict: bool, _where: str = "values") -> d
             key = _require_token(raw_key, what=f"{_where} key")
         else:
             key = raw_key if isinstance(raw_key, str) else str(raw_key)
-        where = f"{_where}[{key!r}]"
-
-        if isinstance(raw_value, dict):
-            normalized[key] = normalize_tree(raw_value, strict=strict, _where=where)
-        elif isinstance(raw_value, list):
-            if strict:
-                normalized[key] = [
-                    _require_token(item, what=f"{where} value") for item in raw_value
-                ]
-            else:
-                normalized[key] = [
-                    item if isinstance(item, str) else str(item) for item in raw_value
-                ]
-        elif isinstance(raw_value, str):
-            if strict:
-                _require_token(raw_value, what=f"{where} value")
-            normalized[key] = [raw_value]
-        elif strict:
-            raise TreeError(
-                f"{where} must be a mapping, string, or list of strings, "
-                f"got {type(raw_value).__name__}: {raw_value!r}"
-            )
-        else:
-            normalized[key] = [str(raw_value)]
+        normalized[key] = _normalize_value(raw_value, strict=strict, where=f"{_where}[{key!r}]")
     return normalized
 
 
-def select_subtree(config: dict[str, Any], path: list[str]) -> dict[str, Node] | None:
-    """Select and normalize the subtree at *path* from an active config tree.
+def select_subtree(config: dict[str, Any], path: list[str]) -> Node | None:
+    """Select and normalize the node at *path* from an active config tree.
 
-    Returns ``None`` when the path is absent. A leaf at the exact path is a
-    shape mismatch the diff handles; it is returned as an empty subtree so
-    the caller still sees "present".
+    Returns ``None`` when the path is absent. A subtree at the path is a
+    normalized ``dict``; a leaf at the exact path is a normalized
+    ``list[str]``. Non-string device scalars at a leaf are coerced with
+    ``str()``.
     """
 
     node: Any = config
@@ -121,14 +121,12 @@ def select_subtree(config: dict[str, Any], path: list[str]) -> dict[str, Node] |
         if not isinstance(node, dict) or token not in node:
             return None
         node = node[token]
-    if isinstance(node, dict):
-        return normalize_tree(node, strict=False, _where="active")
-    return {}
+    return _normalize_value(node, strict=False, where="active")
 
 
 def diff_tree(
-    active: dict[str, Node] | None,
-    desired: dict[str, Node],
+    active: Node | None,
+    desired: Node | None,
     path: list[str],
     *,
     replace: bool,
@@ -136,21 +134,70 @@ def diff_tree(
     """Compute ``(delete_argvs, set_argvs)`` turning *active* into *desired*.
 
     Each argv is a full config path token list (without the ``set`` /
-    ``delete`` word). Merge mode (``replace=False``) emits only sets; extra
-    active state is unmanaged. Replace mode also deletes active keys and
-    leaf values absent from *desired*. Deletes are ordered before sets so a
-    single-value overwrite (delete old value, set new) is safe for both
-    single- and multi-value nodes within one atomic session.
+    ``delete`` word). *active* and *desired* may each be a subtree
+    (``dict``), a leaf (``list[str]``), or *active* may be ``None`` when
+    the path is absent. ``desired=None`` is rejected: absence is an
+    ``Absent`` intent, not a diff mode.
+
+    Merge mode (``replace=False``) emits only sets; extra active state is
+    unmanaged. Replace mode also deletes active keys and leaf values
+    absent from *desired*. Leaf-vs-leaf at the root compares as unordered
+    value sets. Leaf-vs-dict and dict-vs-leaf at the root clear-then-set
+    under replace, the same as a shape flip one level down. Deletes are
+    ordered before sets so a single-value overwrite (delete old value, set
+    new) is safe for both single- and multi-value nodes within one atomic
+    session.
     """
+
+    if desired is None:
+        raise TreeError("desired must be a mapping or a leaf value list, got None")
 
     deletes: list[list[str]] = []
     sets: list[list[str]] = []
-    _diff_node(active if active is not None else {}, desired, path, replace, deletes, sets)
+    if isinstance(desired, dict) and (active is None or isinstance(active, dict)):
+        _diff_node(active if active is not None else {}, desired, path, replace, deletes, sets)
+    else:
+        _diff_value(active, desired, path, replace, deletes, sets)
     if not deletes and not sets and active is None:
         # Path itself absent and desired is empty: creating the bare node is
         # still a change (presence node).
         sets.append(list(path))
     return deletes, sets
+
+
+def _diff_value(
+    active_value: Node | None,
+    desired_value: Node,
+    prefix: list[str],
+    replace: bool,
+    deletes: list[list[str]],
+    sets: list[list[str]],
+) -> None:
+    if isinstance(desired_value, dict):
+        if isinstance(active_value, dict):
+            if not desired_value and not active_value:
+                return
+            _diff_node(active_value, desired_value, prefix, replace, deletes, sets)
+        else:
+            if active_value is not None and replace and desired_value:
+                # Leaf where a subtree is desired: clear it first.
+                deletes.append(list(prefix))
+            if desired_value:
+                _diff_node({}, desired_value, prefix, replace, deletes, sets)
+            elif active_value is None:
+                sets.append(list(prefix))
+    else:
+        active_values = active_value if isinstance(active_value, list) else []
+        if isinstance(active_value, dict) and replace and desired_value:
+            # Subtree where a leaf is desired: clear it first.
+            deletes.append(list(prefix))
+        for value in desired_value:
+            if value not in active_values:
+                sets.append([*prefix, value])
+        if replace:
+            for value in active_values:
+                if value not in desired_value:
+                    deletes.append([*prefix, value])
 
 
 def _diff_node(
@@ -162,34 +209,7 @@ def _diff_node(
     sets: list[list[str]],
 ) -> None:
     for key, desired_value in desired.items():
-        child_prefix = [*prefix, key]
-        active_value = active.get(key)
-
-        if isinstance(desired_value, dict):
-            if isinstance(active_value, dict):
-                if not desired_value and not active_value:
-                    continue
-                _diff_node(active_value, desired_value, child_prefix, replace, deletes, sets)
-            else:
-                if active_value is not None and replace:
-                    # Leaf where a subtree is desired: clear it first.
-                    deletes.append(child_prefix)
-                if desired_value:
-                    _diff_node({}, desired_value, child_prefix, replace, deletes, sets)
-                elif active_value is None:
-                    sets.append(child_prefix)
-        else:
-            active_values = active_value if isinstance(active_value, list) else []
-            if isinstance(active_value, dict) and replace:
-                # Subtree where a leaf is desired: clear it first.
-                deletes.append(child_prefix)
-            for value in desired_value:
-                if value not in active_values:
-                    sets.append([*child_prefix, value])
-            if replace:
-                for value in active_values:
-                    if value not in desired_value:
-                        deletes.append([*child_prefix, value])
+        _diff_value(active.get(key), desired_value, [*prefix, key], replace, deletes, sets)
 
     if replace:
         for key in active:

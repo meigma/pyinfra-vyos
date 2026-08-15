@@ -9,6 +9,7 @@ from pyinfra_vyos._parse import (
     ParseError,
     config_command_lines,
     parse_config_json,
+    parse_pending_save,
     parse_version,
     stream_is_nonempty,
     strip_marker,
@@ -288,3 +289,22 @@ def test_stream_is_nonempty_restores_position_to_the_start() -> None:
     assert stream_is_nonempty(stream) is True
     assert stream.tell() == 0
     assert stream.read() == "abc"
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ("0", False),
+        ("37", True),
+        ("  0\n", False),
+        ("\n  37  \n", True),
+    ],
+)
+def test_parse_pending_save_truth_table(payload: str, expected: bool) -> None:
+    assert parse_pending_save(payload) is expected
+
+
+@pytest.mark.parametrize("payload", ["", "x", "-1", "0\n1"])
+def test_parse_pending_save_rejects_malformed(payload: str) -> None:
+    with pytest.raises(ParseError, match="nonnegative integer"):
+        parse_pending_save(payload)
