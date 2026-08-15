@@ -3,94 +3,233 @@ from __future__ import annotations
 import pytest
 from pyinfra.api.exceptions import FactProcessError
 
-from pyinfra_vyos.facts import GitConfig, GitVersion
+from pyinfra_vyos._parse import OUTPUT_MARKER
+from pyinfra_vyos.facts import Configuration, ConfigurationCommands, Version
+
+# synthesized from docs/research, not appliance-captured
+SHOW_VERSION_SAGITTA = [
+    "Version:          VyOS 1.4-rolling-202106270801",
+    "Release Train:    sagitta",
+    "",
+    "Built by:         senthil@vyos.net",
+    "Built on:         Sun 27 Jun 2021 09:50 UTC",
+    "Build UUID:       ee77c375-9100-49f4-b536-0a0a14c6a1e8",
+    "Build Commit ID:  ed0b0ebca95fba82",
+    "",
+    "Architecture:     x86_64",
+    "Boot via:         installed image",
+    "System type:      KVM guest",
+    "",
+    "Hardware vendor:  QEMU",
+    "Hardware model:   Standard PC (i440FX + PIIX, 1996)",
+    "Hardware S/N:     ",
+    "Hardware UUID:    Unknown",
+    "",
+    "Copyright:        VyOS maintainers and contributors",
+]
+
+# synthesized from docs/research, not appliance-captured
+SHOW_VERSION_CIRCINUS = [
+    "Version:          VyOS 1.5-rolling-202403010000",
+    "Release Train:    circinus",
+    "",
+    "Built by:         autobuild@vyos.net",
+    "Built on:         Fri 01 Mar 2024 00:00 UTC",
+    "Build UUID:       11111111-2222-3333-4444-555555555555",
+    "Build Commit ID:  abcdef0123456789",
+    "",
+    "Architecture:     x86_64",
+    "Boot via:         installed image",
+    "System type:      KVM guest",
+    "",
+    "Hardware vendor:  QEMU",
+    "Hardware model:   Standard PC (Q35 + ICH9, 2009)",
+    "Hardware S/N:     ",
+    "Hardware UUID:    Unknown",
+    "",
+    "Copyright:        VyOS maintainers and contributors",
+]
+
+CONFIG_JSON_VALID = '{"system": {"host-name": "gateway", "login": {"user": {"vyos": {}}}}}'
+
+# synthesized from docs/research, not appliance-captured
+CONFIG_COMMANDS = [
+    "set system host-name 'gateway'",
+    "set interfaces ethernet eth0 address '192.0.2.1/24'",
+    "set system login user vyos authentication hashed-password '$6$secret'",
+]
+CONFIG_COMMANDS_STRIP_PRIVATE = [
+    "set system host-name 'gateway'",
+    "set interfaces ethernet eth0 address '192.0.2.1/24'",
+    "set system login user vyos authentication hashed-password '****************'",
+]
 
 
-def test_git_version_fact_runs_git_version() -> None:
-    command = GitVersion().command()
-
-    assert command.get_raw_value() == "git --version"
-    assert command.get_masked_value() == command.get_raw_value()
+def _with_marker(lines: list[str]) -> list[str]:
+    return [*lines, "", OUTPUT_MARKER]
 
 
-def test_git_version_fact_requires_the_git_binary() -> None:
-    """Hosts without git yield ``default()`` rather than failing the run."""
+def test_version_fact_runs_show_version_with_one_run_and_marker() -> None:
+    command = Version().command()
+    rendered = command.get_raw_value()
 
-    assert GitVersion().requires_command() == "git"
-    assert GitConfig().requires_command() == "git"
-
-
-def test_git_version_fact_strips_the_banner() -> None:
-    assert GitVersion().process(["git version 2.51.2"]) == "2.51.2"
-
-
-def test_git_version_fact_ignores_vendor_suffixes() -> None:
-    """Apple's git appends a build tag: ``git version 2.39.5 (Apple Git-154)``."""
-
-    assert GitVersion().process(["git version 2.39.5 (Apple Git-154)"]) == "2.39.5"
+    assert rendered == (
+        "vbash -c 'export VYATTA_PAGER=cat\n"
+        "source /opt/vyatta/etc/functions/script-template\n"
+        f"run show version && printf '\\''\\n%s\\n'\\'' {OUTPUT_MARKER}'"
+    )
+    assert OUTPUT_MARKER in rendered
+    assert rendered.count("\nrun ") == 1
+    assert command.get_masked_value() == rendered
 
 
-def test_git_config_fact_lists_only_repository_local_configuration() -> None:
-    command = GitConfig().command(path="/srv/my repo")
+def test_version_fact_parses_marker_wrapped_sagitta_payload() -> None:
+    parsed = Version().process(_with_marker(SHOW_VERSION_SAGITTA))
 
-    assert command.get_raw_value() == "git -C '/srv/my repo' config --local --list --null"
-
-
-def test_git_config_fact_defaults_to_the_working_directory() -> None:
-    assert GitConfig().command().get_raw_value() == "git -C . config --local --list --null"
-
-
-def test_git_config_fact_parses_null_delimited_entries() -> None:
-    output = ["core.bare\nfalse\0user.name\nAda Lovelace\0"]
-
-    assert GitConfig().process(output) == {"core.bare": "false", "user.name": "Ada Lovelace"}
+    assert parsed["version"] == "VyOS 1.4-rolling-202106270801"
+    assert parsed["release_train"] == "sagitta"
+    assert parsed["built_by"] == "senthil@vyos.net"
+    assert parsed["built_on"] == "Sun 27 Jun 2021 09:50 UTC"
+    assert parsed["architecture"] == "x86_64"
+    assert parsed["hardware_s/n"] == ""
 
 
-def test_git_config_fact_rejoins_multi_line_output() -> None:
-    """pyinfra splits stdout on newlines; config values may contain newlines.
+def test_version_fact_parses_marker_wrapped_circinus_payload() -> None:
+    parsed = Version().process(_with_marker(SHOW_VERSION_CIRCINUS))
 
-    The raw bytes ``demo.multi\\nline1\\nline2\\0`` reach ``process()`` as three
-    list entries, and only rejoining them recovers the real value.
-    """
+    assert parsed["version"] == "VyOS 1.5-rolling-202403010000"
+    assert parsed["release_train"] == "circinus"
 
-    output = ["user.name\nAda", "Lovelace\0demo.multi\nline1", "line2\0"]
 
-    assert GitConfig().process(output) == {
-        "user.name": "Ada\nLovelace",
-        "demo.multi": "line1\nline2",
+def test_configuration_fact_runs_show_configuration_json() -> None:
+    command = Configuration().command()
+    rendered = command.get_raw_value()
+
+    assert rendered == (
+        "vbash -c 'export VYATTA_PAGER=cat\n"
+        "source /opt/vyatta/etc/functions/script-template\n"
+        "run show configuration json && "
+        f"printf '\\''\\n%s\\n'\\'' {OUTPUT_MARKER}'"
+    )
+    assert OUTPUT_MARKER in rendered
+    assert rendered.count("\nrun ") == 1
+
+
+def test_configuration_fact_parses_marker_wrapped_json() -> None:
+    parsed = Configuration().process(_with_marker([CONFIG_JSON_VALID]))
+
+    assert parsed == {
+        "system": {"host-name": "gateway", "login": {"user": {"vyos": {}}}},
     }
 
 
-def test_git_config_fact_keeps_the_last_value_of_a_multi_valued_key() -> None:
-    output = ["remote.origin.url\nfirst\0remote.origin.url\nsecond\0"]
+def test_configuration_fact_rejoins_multiline_json() -> None:
+    """pyinfra splits stdout on newlines; JSON is rejoined before parsing."""
 
-    assert GitConfig().process(output) == {"remote.origin.url": "second"}
+    output = _with_marker(
+        [
+            "{",
+            '  "system": {',
+            '    "host-name": "gateway"',
+            "  }",
+            "}",
+        ],
+    )
+
+    assert Configuration().process(output) == {"system": {"host-name": "gateway"}}
 
 
-def test_git_config_fact_defaults_are_empty() -> None:
-    assert GitVersion().default() == ""
-    assert GitConfig().default() == {}
-    assert GitConfig().process([""]) == {}
+def test_configuration_commands_fact_runs_show_configuration_commands() -> None:
+    command = ConfigurationCommands().command()
+    rendered = command.get_raw_value()
+
+    assert rendered == (
+        "vbash -c 'export VYATTA_PAGER=cat\n"
+        "source /opt/vyatta/etc/functions/script-template\n"
+        "run show configuration commands && "
+        f"printf '\\''\\n%s\\n'\\'' {OUTPUT_MARKER}'"
+    )
+    assert OUTPUT_MARKER in rendered
+    assert rendered.count("\nrun ") == 1
+    assert r"\|" not in rendered
+    assert "strip-private" not in rendered
 
 
-def test_fact_processing_failures_raise_fact_process_error() -> None:
+def test_configuration_commands_fact_renders_strip_private_op_pipe_tokens() -> None:
+    """``\\|`` ``strip-private`` is a VyOS op pipe, not a shell pipeline."""
+
+    command = ConfigurationCommands().command(strip_private=True)
+    rendered = command.get_raw_value()
+
+    assert rendered == (
+        "vbash -c 'export VYATTA_PAGER=cat\n"
+        "source /opt/vyatta/etc/functions/script-template\n"
+        "run show configuration commands \\| strip-private && "
+        f"printf '\\''\\n%s\\n'\\'' {OUTPUT_MARKER}'"
+    )
+    assert OUTPUT_MARKER in rendered
+    assert rendered.count("\nrun ") == 1
+    assert r"\|" in rendered
+    assert "strip-private" in rendered
+
+
+def test_configuration_commands_fact_parses_marker_wrapped_set_form() -> None:
+    assert ConfigurationCommands().process(_with_marker(CONFIG_COMMANDS)) == CONFIG_COMMANDS
+
+
+def test_configuration_commands_fact_keeps_strip_private_redaction() -> None:
+    assert (
+        ConfigurationCommands().process(_with_marker(CONFIG_COMMANDS_STRIP_PRIVATE))
+        == CONFIG_COMMANDS_STRIP_PRIVATE
+    )
+
+
+def test_facts_require_the_vbash_binary() -> None:
+    """Hosts without vbash yield ``default()``; this is not a VyOS-ness check."""
+
+    assert Version().requires_command() == "vbash"
+    assert Configuration().requires_command() == "vbash"
+    assert ConfigurationCommands().requires_command() == "vbash"
+    assert ConfigurationCommands().requires_command(strip_private=True) == "vbash"
+
+
+def test_fact_defaults_are_empty() -> None:
+    assert Version().default() == {}
+    assert Configuration().default() == {}
+    assert ConfigurationCommands().default() == []
+
+
+@pytest.mark.parametrize(
+    "fact",
+    [Version(), Configuration(), ConfigurationCommands()],
+)
+def test_marker_missing_payload_raises_fact_process_error(
+    fact: Version | Configuration | ConfigurationCommands,
+) -> None:
     """Processing failures must fail only the affected host, not the run.
 
     pyinfra contains only ``FactProcessError`` around ``fact.process()``;
     anything else escaping would abort the entire multi-host deploy.
     """
 
-    with pytest.raises(FactProcessError):
-        GitVersion().process(["gti version 2.51.2"])
-    with pytest.raises(FactProcessError, match="has no value"):
-        GitConfig().process(["core.bare\0"])
-    with pytest.raises(FactProcessError, match="has no key"):
-        GitConfig().process(["\nfalse\0"])
+    with pytest.raises(FactProcessError, match="missing the trailing package marker"):
+        fact.process(["Version:          VyOS 1.4-rolling-202106270801"])
 
 
-def test_git_config_parse_errors_name_the_repository() -> None:
-    fact = GitConfig()
-    fact.command(path="/srv/repo")
+def test_version_empty_payload_with_marker_fails_loudly() -> None:
+    with pytest.raises(FactProcessError, match="missing a version field"):
+        Version().process([OUTPUT_MARKER])
+    with pytest.raises(FactProcessError, match="missing a version field"):
+        Version().process(["", OUTPUT_MARKER])
 
-    with pytest.raises(FactProcessError, match="/srv/repo"):
-        fact.process(["core.bare\0"])
+
+def test_configuration_empty_payload_with_marker_fails_loudly() -> None:
+    with pytest.raises(FactProcessError, match="not valid"):
+        Configuration().process([OUTPUT_MARKER])
+    with pytest.raises(FactProcessError, match="not valid"):
+        Configuration().process(["", OUTPUT_MARKER])
+
+
+def test_configuration_commands_empty_payload_with_marker_is_empty() -> None:
+    assert ConfigurationCommands().process([OUTPUT_MARKER]) == []
+    assert ConfigurationCommands().process(["", OUTPUT_MARKER]) == []

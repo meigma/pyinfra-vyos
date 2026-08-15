@@ -1,14 +1,20 @@
-"""Git facts collected by running the ``git`` CLI on each host.
+"""VyOS facts collected by running op-mode commands on each host.
 
-Every fact runs a direct ``git`` command through the host's pyinfra connector
-— ``@local``, SSH, or any other — and parses what it prints. Targets need
-only the ``git`` binary; no Python and no package install.
+Every fact runs a VyOS op-mode command through the host's pyinfra connector
+— ``@local``, SSH, or any other — via :func:`vyos_op_command`, and parses
+what it prints. Targets need the ``vbash`` binary; no Python and no package
+install on the appliance.
 
-The two facts here demonstrate the two canonical shapes a pyinfra fact takes:
-:class:`GitVersion` is argument-less with a trivial ``process()``, while
-:class:`GitConfig` is parameterized and must carry its arguments from
-``command()`` to ``process()``. Replace both when molding this template into
-a real package; keep the structure.
+:meth:`~pyinfra.api.facts.FactBase.requires_command` is a binary-presence
+gate only. Hosts without ``vbash`` yield :meth:`~pyinfra.api.facts.FactBase.default`
+instead of failing. The gate does not establish that the host is a VyOS
+appliance or that op-mode commands are compatible.
+
+The facts here demonstrate the two canonical shapes a pyinfra fact takes:
+:class:`Version` and :class:`Configuration` are argument-less with a
+straightforward ``process()``, while :class:`ConfigurationCommands` is
+parameterized and must carry its arguments from ``command()`` to
+``process()`` when ``process()`` needs them.
 """
 
 from __future__ import annotations
@@ -20,16 +26,19 @@ from typing import ParamSpec, TypeVar
 from pyinfra.api import FactBase, StringCommand
 from pyinfra.api.exceptions import FactProcessError
 
-from pyinfra_vyos._cli import git_command
-from pyinfra_vyos._gitconfig import parse_config_list
+from pyinfra_vyos._cli import vyos_op_command
+from pyinfra_vyos._parse import (
+    OUTPUT_MARKER,
+    config_command_lines,
+    parse_config_json,
+    parse_version,
+    strip_marker,
+)
 
-__all__ = ["GitConfig", "GitVersion"]
+__all__ = ["Configuration", "ConfigurationCommands", "Version"]
 
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
-
-DEFAULT_PATH = "."
-"""Repository directory used when a fact or operation is not given one."""
 
 
 def _fact_process(process: Callable[_P, _T]) -> Callable[_P, _T]:
@@ -37,9 +46,10 @@ def _fact_process(process: Callable[_P, _T]) -> Callable[_P, _T]:
 
     pyinfra contains only :class:`FactProcessError` around ``fact.process()``;
     any other exception escaping ``process()`` aborts the entire multi-host
-    run. Malformed CLI output (an unrecognised version banner, a valueless
-    config entry) must instead fail only the affected host — logged as a fact
-    failure, honoring ``_ignore_errors`` and ``default()``.
+    run. Malformed CLI output (a missing package marker, a ``show version``
+    payload without a version field, invalid configuration JSON) must instead
+    fail only the affected host — logged as a fact failure, honoring
+    ``_ignore_errors`` and ``default()``.
     """
 
     @wraps(process)
@@ -49,67 +59,114 @@ def _fact_process(process: Callable[_P, _T]) -> Callable[_P, _T]:
         except FactProcessError:
             raise
         except Exception as error:
-            raise FactProcessError(f"invalid git fact output: {error}") from error
+            raise FactProcessError(f"invalid VyOS fact output: {error}") from error
 
     return wrapper
 
 
-class GitVersion(FactBase[str]):
-    """Return the target's ``git`` version as a bare version string.
+class Version(FactBase[dict]):
+    """Return the target's ``show version`` fields as a label-to-value mapping.
 
-    Runs ``git --version`` and strips the ``git version`` banner, so
-    ``git version 2.39.5 (Apple Git-154)`` yields ``2.39.5``. Hosts without
-    ``git`` yield :meth:`default` instead of failing, because
-    :meth:`requires_command` gates the fact on the binary's presence.
+    Runs ``show version`` through :func:`vyos_op_command`, which appends the
+    package output marker. :meth:`process` requires and strips that marker
+    before parsing. Labels are normalized (lowercased, spaces to
+    underscores). The ``version`` field is required; unknown labels and
+    missing optionals are kept or omitted as the parser produces them.
+
+    Hosts without ``vbash`` yield :meth:`default` rather than failing.
+    :meth:`requires_command` is a binary-presence gate only — it does not
+    establish that the host is a VyOS appliance or that op-mode commands
+    are compatible.
     """
-
-    @staticmethod
-    def default() -> str:
-        return ""
-
-    def requires_command(self, *args: object, **kwargs: object) -> str:
-        return "git"
-
-    def command(self) -> StringCommand:
-        return git_command("--version")
-
-    @_fact_process
-    def process(self, output: list[str]) -> str:
-        banner = "\n".join(output).strip()
-        prefix = "git version "
-        if not banner.startswith(prefix):
-            raise ValueError(f"unexpected `git --version` output: {banner!r}")
-        return banner[len(prefix) :].split()[0]
-
-
-class GitConfig(FactBase[dict]):
-    """Return one repository's local git configuration keyed by config key.
-
-    Runs ``git -C <path> config --local --list --null``, which reports only
-    the repository's own ``.git/config`` — never the user's global or the
-    machine's system configuration.
-
-    ``--null`` is required for correctness: configuration values may contain
-    newlines, so NUL is the only reliable record separator. pyinfra hands
-    ``process()`` the output split on newlines, so it is rejoined before
-    parsing. ``path`` is stored on the instance because pyinfra calls
-    ``command()`` and ``process()`` on the same object and the repository is
-    needed for the parse-failure message.
-    """
-
-    _path: str = DEFAULT_PATH
 
     @staticmethod
     def default() -> dict:
         return {}
 
     def requires_command(self, *args: object, **kwargs: object) -> str:
-        return "git"
+        """Return ``vbash`` as a binary-presence gate, not a VyOS-ness check."""
+        return "vbash"
 
-    def command(self, path: str = DEFAULT_PATH) -> StringCommand:
-        self._path = path
-        return git_command("config", "--local", "--list", "--null", path=path)
+    def command(self) -> StringCommand:
+        return vyos_op_command("show", "version", marker=OUTPUT_MARKER)
 
     @_fact_process
     def process(self, output: list[str]) -> dict:
-        return parse_config_list("\n".join(output), source=self._path)
+        return parse_version(strip_marker(output))
+
+
+class Configuration(FactBase[dict]):
+    """Return the target's running configuration as the raw JSON tree.
+
+    Runs ``show configuration json`` through :func:`vyos_op_command`, which
+    appends the package output marker. :meth:`process` requires and strips
+    that marker, rejoins the payload (pyinfra splits stdout on newlines),
+    and returns the tree as loaded — no key or value normalization.
+
+    This fact is secret-bearing. Returned fact values, verbose fact output,
+    failed-fact combined output, and operation failure diagnostics can all
+    reach controller logs. The library cannot enforce "never log"; callers
+    must treat controller logs as sensitive. Failure output is kept minimal
+    and this package never prints config diffs.
+
+    Hosts without ``vbash`` yield :meth:`default` rather than failing.
+    :meth:`requires_command` is a binary-presence gate only — it does not
+    establish that the host is a VyOS appliance or that op-mode commands
+    are compatible.
+    """
+
+    @staticmethod
+    def default() -> dict:
+        return {}
+
+    def requires_command(self, *args: object, **kwargs: object) -> str:
+        """Return ``vbash`` as a binary-presence gate, not a VyOS-ness check."""
+        return "vbash"
+
+    def command(self) -> StringCommand:
+        return vyos_op_command("show", "configuration", "json", marker=OUTPUT_MARKER)
+
+    @_fact_process
+    def process(self, output: list[str]) -> dict:
+        return parse_config_json("\n".join(strip_marker(output)))
+
+
+class ConfigurationCommands(FactBase[list]):
+    """Return the target's configuration as device-rendered set-form lines.
+
+    Runs ``show configuration commands`` through :func:`vyos_op_command`,
+    which appends the package output marker. When ``strip_private`` is true,
+    the VyOS op-pipe tokens ``\\|`` and ``strip-private`` are appended as
+    ordinary argv — a VyOS op pipe, not a shell pipeline. :meth:`process`
+    requires and strips the marker, then keeps nonempty device-rendered
+    lines as-is.
+
+    Unredacted output is secret-bearing. Returned fact values, verbose fact
+    output, failed-fact combined output, and operation failure diagnostics
+    can all reach controller logs. The library cannot enforce "never log";
+    callers must treat controller logs as sensitive. ``strip_private``
+    output is not restore-faithful and must not be used as a backup.
+
+    Hosts without ``vbash`` yield :meth:`default` rather than failing.
+    :meth:`requires_command` is a binary-presence gate only — it does not
+    establish that the host is a VyOS appliance or that op-mode commands
+    are compatible.
+    """
+
+    @staticmethod
+    def default() -> list:
+        return []
+
+    def requires_command(self, *args: object, **kwargs: object) -> str:
+        """Return ``vbash`` as a binary-presence gate, not a VyOS-ness check."""
+        return "vbash"
+
+    def command(self, strip_private: bool = False) -> StringCommand:
+        argv: tuple[str, ...] = ("show", "configuration", "commands")
+        if strip_private:
+            argv = (*argv, r"\|", "strip-private")
+        return vyos_op_command(*argv, marker=OUTPUT_MARKER)
+
+    @_fact_process
+    def process(self, output: list[str]) -> list:
+        return config_command_lines(strip_marker(output))

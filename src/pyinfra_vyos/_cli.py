@@ -1,28 +1,18 @@
-"""Shared construction helpers for direct ``git`` CLI commands.
+"""Shared construction helpers for target CLI commands.
 
-Every fact and operation in this package runs the ``git`` CLI on the target
-host through pyinfra's connector. This module is the single place where those
+Every fact and operation in this package runs commands on the target host
+through pyinfra's connector. This module is the single place where those
 commands are assembled; domain modules build commands with these helpers and
 never execute anything themselves.
 
-Security contract — keep this intact when the sample domain is replaced:
-
-- Every user-supplied value placed in argv (repository paths, configuration
-  keys, configuration values, ...) MUST be wrapped in
-  :class:`pyinfra.api.QuoteString` by the caller so it is shell-quoted when
-  the command renders. Bare ``str`` bits are reserved for trusted literals:
-  the subcommand words and flags this package itself chooses.
-- Shell quoting cannot protect against the ``git`` CLI's own option parsing:
-  a quoted value beginning with ``-`` still parses as an option once the
-  shell layer is gone (``git config --local user.name --global`` does not set
-  a value, it re-scopes the command). :func:`git_command` therefore rejects
-  every ``QuoteString``-wrapped value that starts with ``-`` by raising
-  :class:`CommandError`.
-- Nothing secret ever goes in argv. Values that must stay off the process
-  table travel on standard input via the ``stdin`` keyword, which maps to
-  pyinfra's ``_stdin`` connector argument. The sample ``git config`` domain
-  has no such value, so nothing passes ``stdin`` today; the plumbing is here
-  because the real domain that replaces it usually needs it.
+Wave-1 contract — architecture-sanctioned collapse of the template's argv
+machinery. This wave has no user-supplied argv: callers pass only
+library-generated tokens (op-mode words, package markers, staging paths).
+There is therefore no ``_stdin`` plumbing and no leading-dash rejection.
+``QuoteString`` is applied here to interpolated staging and script paths;
+everything else is a trusted literal. pyinfra still executes the rendered
+string via ``sh -c``, so ``vbash -c`` / ``sg … -c`` payloads are
+shell-quoted in this module.
 """
 
 from __future__ import annotations
@@ -30,52 +20,88 @@ from __future__ import annotations
 from pyinfra.api import QuoteString, StringCommand
 
 __all__ = [
-    "CommandError",
     "QuoteString",
     "StringCommand",
-    "git_command",
+    "sg_probe",
+    "sg_vbash_run",
+    "vyos_op_command",
 ]
 
-
-class CommandError(RuntimeError):
-    """Raised when a value cannot be rendered safely into ``git`` argv."""
-
-
-def _reject_option_lookalike(value: str) -> None:
-    if value.startswith("-"):
-        raise CommandError(
-            f"value {value!r} cannot start with '-': git would parse it as a command-line option",
-        )
+_SCRIPT_TEMPLATE = "/opt/vyatta/etc/functions/script-template"
+_VBASH = "/bin/vbash"
 
 
-def git_command(
-    *args: str | QuoteString | StringCommand,
-    path: str | None = None,
-    stdin: str | None = None,
-) -> StringCommand:
-    """Build a :class:`StringCommand` invoking ``git`` with ``args``.
+def _single_quote(value: str) -> str:
+    """Wrap *value* in POSIX single quotes for an outer ``sh -c``.
 
-    ``args`` follow the ``git`` executable verbatim; wrap every user-supplied
-    value in :class:`QuoteString`. When ``path`` is given, ``-C <path>``
-    (quoted) is inserted *before* ``args`` — ``git`` only honours ``-C`` as a
-    top-level option, so a repository-scoped command renders as
-    ``git -C <path> config ...``. When ``stdin`` is given it becomes the
-    command's standard input.
-
-    Every ``QuoteString`` value (and ``path``) is rejected with
-    :class:`CommandError` when it starts with ``-``: shell quoting does not
-    stop git's own parser from consuming such a token as an option, which
-    would silently change what the command does.
+    An embedded ``'`` becomes ``'\\''`` (end quote, escaped quote, resume).
     """
 
-    for arg in args:
-        if isinstance(arg, QuoteString):
-            _reject_option_lookalike(str(arg.obj))
-    bits: list[str | QuoteString | StringCommand] = ["git"]
-    if path is not None:
-        _reject_option_lookalike(path)
-        bits.extend(("-C", QuoteString(path)))
-    bits.extend(args)
-    if stdin is not None:
-        return StringCommand(*bits, _stdin=stdin)
-    return StringCommand(*bits)
+    return "'" + value.replace("'", "'\\''") + "'"
+
+
+def vyos_op_command(*argv: str, marker: str) -> StringCommand:
+    """Wrap bare op-mode *argv* as a ``vbash -c`` script with a trailing marker.
+
+    pyinfra executes via ``sh -c``, where VyOS op-mode commands do not exist.
+    This helper is the only place ``run`` is added: the inner script exports
+    ``VYATTA_PAGER=cat``, sources script-template, invokes ``run <argv…>``
+    once, and on success emits *marker* on its own line via ``printf``
+    chained with ``&&`` so the real command's exit status propagates.
+
+    ``source`` and ``run`` are separate lines inside the ``-c`` payload.
+    ``run`` is a bash alias defined when script-template sources vyatta
+    completion; bash parses a semicolon-joined ``-c`` string as one unit
+    before that source executes, so the alias never expands (rc 127). A
+    newline lets bash parse line by line after the source has run.
+
+    Callers pass VyOS op-pipe tokens (``\\|``, ``strip-private``) as ordinary
+    argv; they are rendered literally. The inner script as a whole is
+    POSIX-single-quote-escaped for the outer shell.
+
+    The pager export stops ``less`` hanging when stdout is a PTY
+    (``_get_pty=True``). The pager pipeline can still mask the op-mode
+    return code under a PTY.
+    """
+
+    inner = StringCommand(
+        "run",
+        *argv,
+        "&&",
+        "printf",
+        "'\\n%s\\n'",
+        marker,
+    )
+    script = f"export VYATTA_PAGER=cat\nsource {_SCRIPT_TEMPLATE}\n{inner.get_raw_value()}"
+    return StringCommand("vbash", "-c", _single_quote(script))
+
+
+def sg_probe() -> StringCommand:
+    """Build the preflight ``sg vyattacfg`` probe, with stdin closed.
+
+    Confirms the connecting user can ``sg`` into ``vyattacfg`` and that
+    ``/bin/vbash`` and script-template are present, before any secret is
+    staged. ``</dev/null`` also prevents a group-password prompt from hanging.
+    """
+
+    inner = f"test -x {_VBASH} && test -r {_SCRIPT_TEMPLATE}"
+    return StringCommand("sg", "vyattacfg", "-c", _single_quote(inner), "</dev/null")
+
+
+def sg_vbash_run(script_path: str, staging_dir: str) -> StringCommand:
+    """Run an uploaded session script as ``vyattacfg``, then remove *staging_dir*.
+
+    Renders as ``sg vyattacfg -c "/bin/vbash <script_path>" </dev/null``
+    followed by ``rc=$?; rm -rf <staging_dir>; exit $rc`` so cleanup runs
+    even when the script fails. *script_path* and *staging_dir* are
+    :class:`QuoteString`-wrapped; they are library-generated staging paths.
+    """
+
+    return StringCommand(
+        f'sg vyattacfg -c "{_VBASH} ',
+        QuoteString(script_path),
+        '" </dev/null; rc=$?; rm -rf ',
+        QuoteString(staging_dir),
+        "; exit $rc",
+        _separator="",
+    )

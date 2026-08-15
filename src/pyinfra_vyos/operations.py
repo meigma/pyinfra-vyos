@@ -1,39 +1,37 @@
-"""Declarative git operations executed through each host's pyinfra connector.
+"""Whole-config load executed through each host's pyinfra connector.
 
-Every operation reconciles from facts at prepare time — read the fact,
-validate, diff, then no-op or yield direct ``git`` CLI commands built by the
-domain module. Commands fail hard (nonzero exit) on mid-deploy drift; there
-are no execution-time re-checks.
-
-:func:`config_entry` is the sample operation and shows the whole idempotency
-loop in one place. Replace it when molding this template into a real package;
-keep the loop.
+:func:`config_load` uploads a rendered config and runs one ``sg vyattacfg``
+session that loads, compare-gates, and optionally saves. There is no
+prepare-time diff: the device's ``load`` + ``sessionChanged`` result is the
+authority (D3), so this operation always yields commands and pyinfra always
+reports it changed.
 """
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Generator
-from typing import Any, TypeVar
+from io import StringIO
+from typing import IO, Any, TypeVar
 
-from pyinfra import host
-from pyinfra.api import StringCommand, operation
+from pyinfra import state
+from pyinfra.api import FileUploadCommand, QuoteString, StringCommand, operation
 from pyinfra.api.exceptions import OperationValueError
 
-from pyinfra_vyos._cli import CommandError
-from pyinfra_vyos._gitconfig import (
-    GitConfigError,
-    config_changes,
-    config_commands,
-    validate_config_key,
-    validate_repository_path,
-)
-from pyinfra_vyos.facts import DEFAULT_PATH, GitConfig
+from pyinfra_vyos._cli import sg_probe, sg_vbash_run
+from pyinfra_vyos._parse import stream_is_nonempty
+from pyinfra_vyos._session import build_load_script, staging_dir
 
-__all__ = ["config_entry"]
-
-_DOMAIN_ERRORS = (CommandError, GitConfigError)
+__all__ = ["config_load"]
 
 _T = TypeVar("_T")
+
+
+class _SourceError(Exception):
+    """Rejected ``config_load`` src; translated to OperationValueError."""
+
+
+_DOMAIN_ERRORS = (_SourceError,)
 
 
 def _guarded(function: Callable[..., _T], *args: Any, **kwargs: Any) -> _T:
@@ -50,38 +48,113 @@ def _guarded(function: Callable[..., _T], *args: Any, **kwargs: Any) -> _T:
         raise OperationValueError(str(error)) from error
 
 
-@operation()
-def config_entry(
-    key: str,
-    value: str | None = None,
-    *,
-    present: bool = True,
-    path: str = DEFAULT_PATH,
-) -> Generator[StringCommand, None, None]:
-    """Ensure one repository-local git configuration entry.
+def _resolve_put_path(src: str) -> str:
+    """Resolve a controller-local path the way pyinfra ``files.put`` does.
 
-    Reads :class:`~pyinfra_vyos.facts.GitConfig` for ``path``, and when
-    the entry already matches, no-ops. Otherwise it runs
-    ``git -C <path> config --local --replace-all <key> <value>`` to set it,
-    or ``git -C <path> config --local --unset-all <key>`` when
-    ``present=False``. ``--local`` keeps every write inside the repository's
-    own ``.git/config``.
-
-    ``value`` is required when ``present`` is true and ignored otherwise.
-    Note that the entry's key is ``key``, not ``name``: pyinfra reserves
-    ``name`` for the operation label and never delivers it to the operation
-    (``tests/test_cli.py`` enforces this for every exported operation).
+    Pinned to pyinfra 3.10.0 ``files.put`` (default ``add_deploy_dir=True``):
+    ``os.path.join(state.cwd, src)`` when ``state.cwd`` is set, else ``src``.
+    ``os.path.join`` keeps an absolute ``src`` unchanged.
     """
 
-    _guarded(validate_repository_path, path)
-    _guarded(validate_config_key, key)
-    if present and value is None:
-        raise OperationValueError(f"value is required to set git config entry {key}")
+    if state.cwd:
+        return os.path.join(state.cwd, src)
+    return src
 
-    current = host.get_fact(GitConfig, path=path)
-    changes = _guarded(config_changes, current, {key: value if present else None})
-    if not changes:
-        settled = f"already set to {value!r}" if present else "already absent"
-        host.noop(f"git config entry {key} in {path} is {settled}")
-        return
-    yield from _guarded(config_commands, path=path, changes=changes)
+
+def _is_seekable(src: object) -> bool:
+    seekable = getattr(src, "seekable", None)
+    if callable(seekable):
+        return bool(seekable())
+    return callable(getattr(src, "seek", None))
+
+
+def _require_nonempty(fileobj: IO[Any], *, src: str) -> None:
+    if not stream_is_nonempty(fileobj):
+        raise _SourceError(f"src is empty or whitespace-only: {src}")
+
+
+def _validate_src(src: str | IO[Any]) -> str | IO[Any]:
+    """Return the FileUploadCommand src after controller-side checks."""
+
+    if isinstance(src, str):
+        path = _resolve_put_path(src)
+        try:
+            with open(path, "rb") as fileobj:
+                _require_nonempty(fileobj, src=path)
+        except OSError as error:
+            raise _SourceError(f"cannot read src: {path}") from error
+        return path
+
+    if not hasattr(src, "read"):
+        raise _SourceError("src must be a path or readable file-like object")
+    if not _is_seekable(src):
+        raise _SourceError("src file-like object must be seekable")
+    _require_nonempty(src, src=repr(src))
+    return src
+
+
+@operation(
+    is_idempotent=False,
+    idempotent_notice=(
+        "device mutation is compare-gated on the target; "
+        "pyinfra always reports this operation as changed"
+    ),
+)
+def config_load(
+    src: str | IO[Any],
+    *,
+    save: bool = False,
+) -> Generator[StringCommand | FileUploadCommand, None, None]:
+    """Load a whole config onto a VyOS host in one configure session.
+
+    ``src`` is a controller-local path (``str``) or a readable, seekable
+    file-like object. A ``str`` is resolved against the deploy directory with
+    the same rule ``files.put`` uses (``os.path.join(state.cwd, src)`` when
+    ``state.cwd`` is set). The controller checks that ``src`` contains at
+    least one non-whitespace byte; that check is TOCTOU-gapped, and the
+    remote grep in the yielded sequence is the enforcing check. pyinfra
+    ``seek(0)``s file-like sources on execute.
+
+    **Concurrency precondition**: the caller MUST serialize all
+    ``config_load`` mutations per host — at most one mutation session may
+    run at a time, including runs from the same controller (§2 / D4).
+    Overlapping mutation runs are out of contract.
+
+    **Cleanup residual**: any yielded command failing before the session
+    runs — an upload, a chmod, the remote non-whitespace guard — or
+    connector loss strands the 0600/0700 staging directory in ``/tmp``.
+    Paths that reach session execution are cleaned up by the EXIT trap
+    and by command 7.
+
+    **Commit-verify-save**: a bad full config can sever SSH. Call with
+    ``save=False``, verify reachability / facts, then call again with
+    ``save=True``.
+
+    **Change reporting**: pyinfra always reports this operation as changed
+    (D3; nonempty executed command list). A save-only run (no candidate
+    diff, boot file still written) reports ``changed`` via the device
+    sentinel, never ``noop``.
+    """
+
+    upload_src = _guarded(_validate_src, src)
+    staging = staging_dir()
+    config_path = f"{staging}/config"
+    script_path = f"{staging}/session.sh"
+
+    yield sg_probe()
+    yield StringCommand("mkdir", "-m", "700", QuoteString(staging))
+    yield FileUploadCommand(upload_src, config_path)
+    yield StringCommand(
+        "chmod",
+        "600",
+        QuoteString(config_path),
+        "&&",
+        "LC_ALL=C",
+        "grep",
+        "-q",
+        QuoteString("[^[:space:]]"),
+        QuoteString(config_path),
+    )
+    yield FileUploadCommand(StringIO(build_load_script(staging, save=save)), script_path)
+    yield StringCommand("chmod", "600", QuoteString(script_path))
+    yield sg_vbash_run(script_path, staging)
