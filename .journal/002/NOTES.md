@@ -99,3 +99,26 @@ _plan_scopes + system_basics, (3) interface, (4) static_route, (5) user,
 (6) firewall_group, (7) firewall_ruleset, (8) docs. Each phase carries
 file-level targets, tests per the §11 contract, and risks; §12 open
 questions mapped to resolving steps (Q1->1.1, Q2->1.8, Q3->2.6, Q4->3.2).
+
+## 2026-08-15 16:05 — Phase 1 implemented; PR #9 open for review
+Orchestrated 2 waves of programmer agents + 1 tight review pass in
+`feat/config-save-substrate`; PR #9 open, CI green, awaiting human review.
+- Wave A (parallel): 1.1 fact-cache verdict, 1.2 _tree Node|None root,
+  1.3 _session PlannedCommand/D11/D13/build_save_script, 1.4 _cli
+  session_run_sequence, 1.6 PendingSave chain. One retry: 1.7/1.8 agent
+  died before editing; respawn completed clean.
+- Review (approve-with-fixes) caught 2 P1s: (a) leaf-root + empty desired +
+  replace planned a destructive, non-convergent bare delete (main treated it
+  as noop) — fixed by gating shape-flip clears on nonempty replacement;
+  (b) D11 suppression was stdout-only, device stderr leaked — sensitive
+  captures now 2>&1. Plus: PendingSave probe now trims whitespace before
+  wc -c (probe/script needs-save semantics now agree); appliance save test
+  verifies /config/config.boot independently; Q2 probe handles list-shaped
+  rule nodes and persists its observation to the capture dir.
+- Q1 resolved: pyinfra 3.9.2..3.10.0 cache-free (api files byte-identical;
+  empirical 3 calls = 3 executions). No floor change.
+- Q2 lab data point (VyOS 2026.03): refused commit left NO partial active
+  state (fully absent). Recorded in capture + test docstring; contract
+  language stays conservative.
+- Appliance tier 7/7 including migrated-config behavior preservation on
+  hardware.
