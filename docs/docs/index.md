@@ -11,10 +11,20 @@ whole-config `config_load` operation for VyOS over SSH. Store a complete
 device config in git and load it as one unit, rather than issuing
 incremental `set` commands from the controller.
 
-Requires Python 3.11+ and pyinfra 3.x. Targets need `vbash` and the VyOS
-script-template substrate; nothing is installed on the appliance.
+Requires Python 3.11+ and pyinfra 3.9.2+. Targets need `vbash` and the VyOS
+script-template substrate; `config_load` additionally needs the connecting
+user to be able to `sg` into the `vyattacfg` group. Nothing is installed
+on the appliance.
 
 ## Install
+
+The first PyPI release is pending. Until then, install from the repository:
+
+```sh
+pip install git+https://github.com/meigma/pyinfra-vyos
+```
+
+After the first release:
 
 ```sh
 pip install pyinfra-vyos
@@ -64,7 +74,7 @@ A bad full config can sever SSH. The canonical pattern is two deploys with
 an external check in between: commit without writing `/config/config.boot`,
 verify reachability and facts, then load again with `save=True`.
 
-`src` must be a footer-bearing config (`// vyos-config-version`). Use a
+`src` should be a footer-bearing config (`// vyos-config-version`). Use a
 `/config/config.boot`-style source (or `save <file>` output). Bare
 `show configuration` output has no footer; VyOS `load` treats that as
 version 0 and runs the full migration chain.
