@@ -15,7 +15,7 @@ from pyinfra.context import ctx_state
 import pyinfra_vyos
 from pyinfra_vyos._cli import sg_probe, sg_vbash_run
 from pyinfra_vyos._session import SENTINEL_CHANGED
-from pyinfra_vyos.operations import _guarded, _SourceError, config, config_load
+from pyinfra_vyos.operations import _guarded, _SourceError, config, config_load, config_save
 
 _VALID_CONFIG = "set system host-name pyinfra-vyos\n"
 _WHITESPACE_ONLY = "  \n\t\n  "
@@ -90,6 +90,10 @@ def test_config_is_idempotent_via_controller_diff() -> None:
     assert config.is_idempotent is True
 
 
+def test_config_save_signature_has_zero_parameters() -> None:
+    assert list(inspect.signature(config_save).parameters) == []
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
@@ -123,9 +127,11 @@ def test_package_exports_the_public_primitives() -> None:
     assert pyinfra_vyos.__all__ == [
         "Configuration",
         "ConfigurationCommands",
+        "PendingSave",
         "Version",
         "config",
         "config_load",
+        "config_save",
     ]
     for exported in pyinfra_vyos.__all__:
         assert getattr(pyinfra_vyos, exported) is not None

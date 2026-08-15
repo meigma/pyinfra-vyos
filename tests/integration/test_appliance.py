@@ -8,9 +8,18 @@ from typing import Any
 
 import pytest
 from pyinfra.api import Inventory, StringCommand
+from pyinfra.api.exceptions import PyinfraError
 from pyinfra.api.operation import OperationMeta
 
-from pyinfra_vyos import Configuration, ConfigurationCommands, Version, config, config_load
+from pyinfra_vyos import (
+    Configuration,
+    ConfigurationCommands,
+    PendingSave,
+    Version,
+    config,
+    config_load,
+    config_save,
+)
 from pyinfra_vyos._cli import vyos_op_command
 from pyinfra_vyos._parse import OUTPUT_MARKER, strip_marker
 from pyinfra_vyos._session import SENTINEL_CHANGED, SENTINEL_NOOP
@@ -75,6 +84,23 @@ def _with_static_host_mapping(config: str, hostname: str) -> str:
         "    }\n"
     )
     return config[: match.end()] + block + config[match.end() :]
+
+
+def _instance_child(node: Any, key: str) -> Any:
+    """Return the child at ``key`` from a dict or list-of-single-key-dicts node.
+
+    Multi-instance JSON nodes render either as a dict keyed by instance name or
+    as a list of single-key dicts (see :func:`_assert_host_mapping`).
+    """
+
+    if isinstance(node, dict):
+        return node.get(key)
+    if isinstance(node, list):
+        return next(
+            (item[key] for item in node if isinstance(item, dict) and key in item),
+            None,
+        )
+    return None
 
 
 def _assert_host_mapping(tree: dict[str, Any], hostname: str) -> None:
@@ -223,5 +249,85 @@ def test_config_scoped_merge_replace_delete_cycle(inventory: Inventory) -> None:
 
         deleted_again = apply(config, inventory=inventory, path=path, present=False)
         assert not deleted_again.did_change()
+    finally:
+        apply(config, inventory=inventory, path=path, present=False)
+
+
+def test_config_save_dirty_then_noop_cycle(inventory: Inventory) -> None:
+    """Dirty the active config, persist with config_save, then noop on a second save.
+
+    save=False on the scratch mutation so only config_save writes boot. Cleanup
+    deletes the scratch path and saves so a crashed run cannot survive reboot.
+    """
+
+    hostname = f"pyinfra-save-{secrets.token_hex(8)}.invalid"
+    path = ["system", "static-host-mapping", "host-name", hostname]
+
+    try:
+        apply(
+            config,
+            inventory=inventory,
+            path=path,
+            values={"inet": "192.0.2.60"},
+            save=False,
+        )
+        assert fact_value(PendingSave, inventory=inventory) is True
+        assert hostname not in _read_boot_config(inventory)
+
+        saved = apply(config_save, inventory=inventory)
+        assert saved.did_change()
+        _assert_sentinel(saved, SENTINEL_CHANGED)
+        assert hostname in _read_boot_config(inventory)
+        assert fact_value(PendingSave, inventory=inventory) is False
+
+        again = apply(config_save, inventory=inventory)
+        assert not again.did_change()
+    finally:
+        apply(config, inventory=inventory, path=path, present=False, save=True)
+
+
+def test_rejected_commit_partial_application_is_a_lab_observation(
+    inventory: Inventory,
+) -> None:
+    """Rejected-commit probe (§12 Q2).
+
+    One ``config`` session whose commit the device refuses because the rule
+    references a nonexistent address-group. The apply must fail. Whether any
+    subtree element then persists (chain node present? rule present?) is
+    observed independently and accepted as either fully absent or partially
+    present. That observation is recorded as a lab-release data point, not a
+    guarantee; docstring language elsewhere stays conservative regardless of
+    outcome.
+    """
+
+    path = ["firewall", "ipv4", "name", "PYINFRA-Q2"]
+    values = {
+        "default-action": "drop",
+        "rule": {
+            "10": {
+                "action": "accept",
+                "source": {"group": {"address-group": "pyinfra-q2-missing"}},
+            }
+        },
+    }
+
+    try:
+        with pytest.raises(PyinfraError):
+            apply(config, inventory=inventory, path=path, values=values)
+
+        tree = fact_value(Configuration, inventory=inventory)
+        names = tree.get("firewall", {}).get("ipv4", {}).get("name")
+        chain = _instance_child(names, "PYINFRA-Q2")
+        chain_present = isinstance(chain, dict)
+        rule = _instance_child(chain.get("rule") if chain_present else None, "10")
+        rule_present = rule is not None
+        fully_absent = not chain_present and not rule_present
+        outcome = "fully absent" if fully_absent else "partially present"
+        artifact = _capture_dir() / "q2-rejected-commit.txt"
+        artifact.write_text(
+            f"pyinfra-vyos Q2 lab-release data point: {outcome} "
+            f"(chain_present={chain_present}, rule_present={rule_present})\n"
+        )
+        print(f"pyinfra-vyos Q2 lab-release data point: {artifact}")
     finally:
         apply(config, inventory=inventory, path=path, present=False)

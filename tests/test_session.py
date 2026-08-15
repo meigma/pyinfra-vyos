@@ -9,8 +9,10 @@ import pytest
 from pyinfra_vyos._session import (
     SENTINEL_CHANGED,
     SENTINEL_NOOP,
+    PlannedCommand,
     build_commands_script,
     build_load_script,
+    build_save_script,
     staging_dir,
 )
 
@@ -23,17 +25,22 @@ _NEEDS_SAVE = (
 )
 _BARE_EXIT_OR_DISCARD = re.compile(r"(?<!builtin )\b(exit|discard)\b")
 _STAGING_PATTERN = re.compile(r"^/tmp/pyinfra-vyos-[0-9a-f]{32}$")
+_COMMIT_GATE = 'if [ "$did_commit" -ne 0 ]; then'
+_SUPPRESSED_OUTPUT = "device output suppressed (sensitive command)"
 _COMMANDS = [
-    ["delete", "service", "ntp", "server", "old.test"],
-    ["set", "service", "ntp", "server", "new.test"],
+    PlannedCommand(["delete", "service", "ntp", "server", "old.test"]),
+    PlannedCommand(["set", "service", "ntp", "server", "new.test"]),
 ]
-_BUILDERS = ["load", "commands"]
+_BUILDERS = ["load", "commands", "save"]
+_COMMIT_BUILDERS = ["load", "commands"]
 
 
 def _script(*, save: bool, kind: str = "load") -> str:
     if kind == "load":
         return build_load_script(_STAGING, save=save)
-    return build_commands_script(_STAGING, _COMMANDS, save=save)
+    if kind == "commands":
+        return build_commands_script(_STAGING, _COMMANDS, save=save)
+    return build_save_script(_STAGING)
 
 
 def _tri_state_blocks(script: str) -> list[str]:
@@ -49,6 +56,13 @@ def _tri_state_blocks(script: str) -> list[str]:
         blocks.append(after[: fi + len("\nfi")])
         start = idx + len(_SESSION_CHANGED)
     return blocks
+
+
+def _failure_branch(script: str, index: int) -> str:
+    marker = f"config command {index} ("
+    start = script.index(marker)
+    end = script.index("builtin exit 1", start)
+    return script[start:end]
 
 
 @pytest.mark.parametrize("save", [False, True])
@@ -93,7 +107,7 @@ def test_every_termination_is_builtin_exit_never_the_aliases(save: bool, kind: s
 
 
 @pytest.mark.parametrize("save", [False, True])
-@pytest.mark.parametrize("kind", _BUILDERS)
+@pytest.mark.parametrize("kind", _COMMIT_BUILDERS)
 def test_session_changed_tri_state_is_present_on_both_calls(save: bool, kind: str) -> None:
     script = _script(save=save, kind=kind)
 
@@ -107,7 +121,7 @@ def test_session_changed_tri_state_is_present_on_both_calls(save: bool, kind: st
         assert "builtin exit 1" in block
 
 
-@pytest.mark.parametrize("kind", _BUILDERS)
+@pytest.mark.parametrize("kind", _COMMIT_BUILDERS)
 def test_save_block_present_iff_save_true(kind: str) -> None:
     with_save = _script(save=True, kind=kind)
     without_save = _script(save=False, kind=kind)
@@ -175,9 +189,9 @@ def test_commands_script_rejects_empty_and_unknown_verbs() -> None:
     with pytest.raises(ValueError, match="nonempty"):
         build_commands_script(_STAGING, [], save=False)
     with pytest.raises(ValueError, match="unsupported"):
-        build_commands_script(_STAGING, [["run", "reboot"]], save=False)
+        build_commands_script(_STAGING, [PlannedCommand(["run", "reboot"])], save=False)
     with pytest.raises(ValueError, match="unsupported"):
-        build_commands_script(_STAGING, [[]], save=False)
+        build_commands_script(_STAGING, [PlannedCommand([])], save=False)
 
 
 def test_commands_are_rendered_in_order_between_session_entry_and_commit_gate() -> None:
@@ -194,7 +208,7 @@ def test_command_tokens_are_shell_quoted() -> None:
     tricky = "hi there 'quoted'"
     script = build_commands_script(
         _STAGING,
-        [["set", "system", "login", "banner", "pre-login", tricky]],
+        [PlannedCommand(["set", "system", "login", "banner", "pre-login", tricky])],
         save=False,
     )
 
@@ -216,7 +230,20 @@ def test_failure_diagnostic_never_contains_command_values() -> None:
     secret = "s3cret-value"
     script = build_commands_script(
         _STAGING,
-        [["set", "system", "login", "user", "x", "authentication", "plaintext-password", secret]],
+        [
+            PlannedCommand(
+                [
+                    "set",
+                    "system",
+                    "login",
+                    "user",
+                    "x",
+                    "authentication",
+                    "plaintext-password",
+                    secret,
+                ]
+            )
+        ],
         save=False,
     )
 
@@ -224,3 +251,116 @@ def test_failure_diagnostic_never_contains_command_values() -> None:
     assert failure_lines
     assert all(secret not in line for line in failure_lines)
     assert any("config command 1 (set) failed" in line for line in failure_lines)
+
+
+def test_commands_script_save_block_is_gated_on_did_commit() -> None:
+    with_save = _script(save=True, kind="commands")
+    without_save = _script(save=False, kind="commands")
+
+    assert _COMMIT_GATE in with_save
+    assert with_save.index(_COMMIT_GATE) < with_save.index(_NEEDS_SAVE)
+    assert with_save.index(_COMMIT_GATE) < with_save.index("$(save)")
+    assert _NEEDS_SAVE not in without_save
+    assert "$(save)" not in without_save
+
+
+def test_load_script_save_block_is_ungated() -> None:
+    script = build_load_script(_STAGING, save=True)
+
+    assert _COMMIT_GATE not in script
+    save_line = next(line for line in script.splitlines() if _NEEDS_SAVE in line)
+    assert not save_line.startswith(" ")
+    assert _NEEDS_SAVE in script
+    assert "$(save)" in script
+
+
+def test_sensitive_failure_suppresses_captured_output() -> None:
+    secret = "s3cret-value"
+    script = build_commands_script(
+        _STAGING,
+        [
+            PlannedCommand(
+                [
+                    "set",
+                    "system",
+                    "login",
+                    "user",
+                    "x",
+                    "authentication",
+                    "plaintext-password",
+                    secret,
+                ],
+                sensitive=True,
+            ),
+            PlannedCommand(["set", "service", "ntp", "server", "new.test"]),
+        ],
+        save=False,
+    )
+
+    branch = _failure_branch(script, 1)
+    assert _SUPPRESSED_OUTPUT in branch
+    assert '"$_cmd_out"' not in branch
+    assert any("config command 1 (set) failed" in line for line in branch.splitlines())
+
+    capture_lines = [line for line in script.splitlines() if line.startswith("_cmd_out=$(")]
+    sensitive_captures = [line for line in capture_lines if secret in line]
+    nonsensitive_captures = [line for line in capture_lines if secret not in line]
+    assert len(sensitive_captures) == 1
+    assert nonsensitive_captures
+    assert "2>&1" in sensitive_captures[0]
+    assert all("2>&1" not in line for line in nonsensitive_captures)
+
+    stderr_bound = [line for line in script.splitlines() if ">&2" in line]
+    assert stderr_bound
+    assert all(secret not in line for line in stderr_bound)
+
+    stderr_or_printf = [line for line in script.splitlines() if ">&2" in line or "printf" in line]
+    assert all(secret not in line for line in stderr_or_printf)
+
+
+def test_nonsensitive_failure_prints_captured_output() -> None:
+    script = build_commands_script(
+        _STAGING,
+        [PlannedCommand(["set", "service", "ntp", "server", "new.test"])],
+        save=False,
+    )
+
+    branch = _failure_branch(script, 1)
+    assert '"$_cmd_out"' in branch
+    assert _SUPPRESSED_OUTPUT not in branch
+    assert any("config command 1 (set) failed" in line for line in branch.splitlines())
+
+
+# --- build_save_script -------------------------------------------------------
+
+
+def test_save_script_load_bearing_lines() -> None:
+    script = build_save_script(_STAGING)
+
+    assert script.index("export VYATTA_PAGER=cat") < script.index(_SOURCE)
+    assert "trap _pyinfra_vyos_cleanup EXIT" in script
+    assert "if ! /bin/cli-shell-api inSession; then" in script
+    assert _NEEDS_SAVE in script
+    assert "$(save)" in script
+    assert "$(commit)" not in script
+    assert _SESSION_CHANGED not in script
+    assert "_cmd_out=" not in script
+    for line in script.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        command = stripped.split(None, 1)[0]
+        assert command not in {"set", "delete", "commit"}
+    assert SENTINEL_CHANGED in script
+    assert SENTINEL_NOOP in script
+    assert SENTINEL_CHANGED == "PYINFRA_VYOS changed"
+    assert SENTINEL_NOOP == "PYINFRA_VYOS noop"
+    assert "builtin exit" in script
+    assert _BARE_EXIT_OR_DISCARD.search(script) is None
+    for line in script.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        command = stripped.split(None, 1)[0]
+        assert command not in {"exit", "discard"}
+    assert f"rm -rf {_STAGING}" in script

@@ -14,7 +14,8 @@ The facts here demonstrate the two canonical shapes a pyinfra fact takes:
 :class:`Version` and :class:`Configuration` are argument-less with a
 straightforward ``process()``, while :class:`ConfigurationCommands` is
 parameterized and must carry its arguments from ``command()`` to
-``process()`` when ``process()`` needs them.
+``process()`` when ``process()`` needs them. :class:`PendingSave` is
+argument-less with a tri-state ``bool | None`` result.
 """
 
 from __future__ import annotations
@@ -26,16 +27,17 @@ from typing import ParamSpec, TypeVar
 from pyinfra.api import FactBase, StringCommand
 from pyinfra.api.exceptions import FactProcessError
 
-from pyinfra_vyos._cli import vyos_op_command
+from pyinfra_vyos._cli import pending_save_probe, vyos_op_command
 from pyinfra_vyos._parse import (
     OUTPUT_MARKER,
     config_command_lines,
     parse_config_json,
+    parse_pending_save,
     parse_version,
     strip_marker,
 )
 
-__all__ = ["Configuration", "ConfigurationCommands", "Version"]
+__all__ = ["Configuration", "ConfigurationCommands", "PendingSave", "Version"]
 
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
@@ -173,3 +175,36 @@ class ConfigurationCommands(FactBase[list]):
     @_fact_process
     def process(self, output: list[str]) -> list:
         return config_command_lines(strip_marker(output))
+
+
+class PendingSave(FactBase[bool | None]):
+    """Whether the active config differs from the saved boot config.
+
+    Tri-state contract:
+
+    - ``None`` — comparison unavailable (missing ``vbash``, command failure,
+      unparseable output). ``config_save`` fails closed on this value.
+    - ``False`` — comparison ran and there is no active-vs-boot diff.
+    - ``True`` — unsaved active changes.
+
+    Any failure path must end in ``None``, never ``False``. Hosts without
+    ``vbash`` yield :meth:`default` rather than failing.
+    :meth:`requires_command` is a binary-presence gate only — it does not
+    establish that the host is a VyOS appliance or that op-mode commands
+    are compatible.
+    """
+
+    @staticmethod
+    def default() -> None:
+        return None
+
+    def requires_command(self, *args: object, **kwargs: object) -> str:
+        """Return ``vbash`` as a binary-presence gate, not a VyOS-ness check."""
+        return "vbash"
+
+    def command(self) -> StringCommand:
+        return pending_save_probe(OUTPUT_MARKER)
+
+    @_fact_process
+    def process(self, output: list[str]) -> bool:
+        return parse_pending_save("\n".join(strip_marker(output)))

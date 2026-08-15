@@ -3,8 +3,9 @@ from __future__ import annotations
 import pytest
 from pyinfra.api.exceptions import FactProcessError
 
+from pyinfra_vyos._cli import pending_save_probe
 from pyinfra_vyos._parse import OUTPUT_MARKER
-from pyinfra_vyos.facts import Configuration, ConfigurationCommands, Version
+from pyinfra_vyos.facts import Configuration, ConfigurationCommands, PendingSave, Version
 
 # synthesized from docs/research, not appliance-captured
 SHOW_VERSION_SAGITTA = [
@@ -194,6 +195,7 @@ def test_facts_require_the_vbash_binary() -> None:
     assert Configuration().requires_command() == "vbash"
     assert ConfigurationCommands().requires_command() == "vbash"
     assert ConfigurationCommands().requires_command(strip_private=True) == "vbash"
+    assert PendingSave().requires_command() == "vbash"
 
 
 def test_fact_defaults_are_empty() -> None:
@@ -236,3 +238,30 @@ def test_configuration_empty_payload_with_marker_fails_loudly() -> None:
 def test_configuration_commands_empty_payload_with_marker_is_empty() -> None:
     assert ConfigurationCommands().process([OUTPUT_MARKER]) == []
     assert ConfigurationCommands().process(["", OUTPUT_MARKER]) == []
+
+
+def test_pending_save_default_is_none() -> None:
+    assert PendingSave().default() is None
+
+
+def test_pending_save_command_renders_via_the_probe_builder() -> None:
+    command = PendingSave().command()
+    rendered = command.get_raw_value()
+
+    assert rendered == pending_save_probe(OUTPUT_MARKER).get_raw_value()
+    assert OUTPUT_MARKER in rendered
+
+
+def test_pending_save_process_reads_marker_wrapped_byte_counts() -> None:
+    assert PendingSave().process(_with_marker(["0"])) is False
+    assert PendingSave().process(_with_marker(["37"])) is True
+    assert PendingSave().process(["  37  ", "", OUTPUT_MARKER]) is True
+
+
+def test_pending_save_process_rejects_missing_marker_and_garbage() -> None:
+    with pytest.raises(FactProcessError, match="missing the trailing package marker"):
+        PendingSave().process(["37"])
+    with pytest.raises(FactProcessError, match="nonnegative integer"):
+        PendingSave().process(_with_marker(["nope"]))
+    with pytest.raises(FactProcessError, match="nonnegative integer"):
+        PendingSave().process(_with_marker(["0\n1"]))

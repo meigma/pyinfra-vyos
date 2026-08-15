@@ -17,11 +17,17 @@ shell-quoted in this module.
 
 from __future__ import annotations
 
-from pyinfra.api import QuoteString, StringCommand
+from io import StringIO
+
+from pyinfra.api import FileUploadCommand, QuoteString, StringCommand
+
+from pyinfra_vyos._session import NEEDS_SAVE_COMMAND
 
 __all__ = [
     "QuoteString",
     "StringCommand",
+    "pending_save_probe",
+    "session_run_sequence",
     "sg_probe",
     "sg_vbash_run",
     "vyos_op_command",
@@ -82,6 +88,40 @@ def vyos_op_command(*argv: str, marker: str, strip_private: bool = False) -> Str
     return StringCommand("vbash", "-c", _single_quote(script))
 
 
+def pending_save_probe(marker: str) -> StringCommand:
+    """Wrap the active-vs-boot comparison as a ``vbash -c`` byte-count probe.
+
+    The comparison runs under ``set -o pipefail`` and is reduced on-device
+    with ``wc -c`` before anything reaches stdout, so config text never
+    transits or lands in fact logs. *marker* is printed on its own line via
+    ``printf`` chained with ``&&``, and only if that pipeline succeeds.
+    ``wc -c`` always prints a count; the fact lands on ``None`` because
+    pipefail makes the command status nonzero and pyinfra skips
+    ``process()`` on failed status, returning ``default()``. Stdout in
+    every outcome is at most a byte count.
+    """
+
+    inner = StringCommand(
+        "{",
+        NEEDS_SAVE_COMMAND,
+        "; }",
+        "|",
+        "tr",
+        "-d",
+        "'[:space:]'",
+        "|",
+        "LC_ALL=C",
+        "wc",
+        "-c",
+        "&&",
+        "printf",
+        "'\\n%s\\n'",
+        marker,
+    )
+    script = f"set -o pipefail\n{inner.get_raw_value()}"
+    return StringCommand("vbash", "-c", _single_quote(script))
+
+
 def sg_probe() -> StringCommand:
     """Build the preflight ``sg vyattacfg`` probe, with stdin closed.
 
@@ -111,3 +151,24 @@ def sg_vbash_run(script_path: str, staging_dir: str) -> StringCommand:
         "; exit $rc",
         _separator="",
     )
+
+
+def session_run_sequence(staging: str, script_text: str) -> list[StringCommand | FileUploadCommand]:
+    """Assemble the shared five-command tail for a configure session.
+
+    Consumed by ``config``, ``config_save``, and every typed op.
+    ``config_load``'s distinct seven-command flow stays inline
+    (pre-existing A3 debt, out of this wave).
+
+    Derives the script path as ``{staging}/session.sh`` once here; callers
+    do not pass it in.
+    """
+
+    script_path = f"{staging}/session.sh"
+    return [
+        sg_probe(),
+        StringCommand("mkdir", "-m", "700", QuoteString(staging)),
+        FileUploadCommand(StringIO(script_text), script_path),
+        StringCommand("chmod", "600", QuoteString(script_path)),
+        sg_vbash_run(script_path, staging),
+    ]

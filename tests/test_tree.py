@@ -94,10 +94,6 @@ def test_select_absent_path_returns_none() -> None:
     assert select_subtree(_CONFIG, ["system", "host-name", "deeper"]) is None
 
 
-def test_select_leaf_at_exact_path_reports_present_as_empty_subtree() -> None:
-    assert select_subtree(_CONFIG, ["system", "host-name"]) == {}
-
-
 # --- diff_tree: merge --------------------------------------------------------
 
 
@@ -210,3 +206,103 @@ def test_valueless_desired_node_is_created_once() -> None:
     assert sets == [[*_PATH, "enable"]]
 
     assert diff_tree({"enable": {}}, {"enable": {}}, _PATH, replace=False) == ([], [])
+
+
+# --- select_subtree: leaf at path --------------------------------------------
+
+
+def test_select_leaf_at_path_returns_normalized_string() -> None:
+    assert select_subtree(_CONFIG, ["system", "host-name"]) == ["r1"]
+
+
+def test_select_leaf_at_path_returns_normalized_list() -> None:
+    config = {"interfaces": {"ethernet": {"eth0": {"address": ["192.0.2.1/24", "192.0.2.2/24"]}}}}
+
+    assert select_subtree(config, ["interfaces", "ethernet", "eth0", "address"]) == [
+        "192.0.2.1/24",
+        "192.0.2.2/24",
+    ]
+
+
+def test_select_leaf_at_path_coerces_device_scalar() -> None:
+    assert select_subtree({"mtu": 1500}, ["mtu"]) == ["1500"]
+
+
+# --- diff_tree: leaf root ----------------------------------------------------
+
+
+def test_leaf_root_sets_missing_values_only() -> None:
+    deletes, sets = diff_tree(["a"], ["a", "b"], _PATH, replace=False)
+
+    assert deletes == []
+    assert sets == [[*_PATH, "b"]]
+
+
+def test_leaf_root_deletes_extra_values_in_replace() -> None:
+    deletes, sets = diff_tree(["a", "b"], ["a"], _PATH, replace=True)
+
+    assert deletes == [[*_PATH, "b"]]
+    assert sets == []
+
+
+def test_leaf_root_swaps_a_value_via_delete_then_set() -> None:
+    deletes, sets = diff_tree(["old"], ["new"], _PATH, replace=True)
+
+    assert deletes == [[*_PATH, "old"]]
+    assert sets == [[*_PATH, "new"]]
+
+
+def test_leaf_root_order_is_not_managed() -> None:
+    assert diff_tree(["a", "b"], ["b", "a"], _PATH, replace=True) == ([], [])
+
+
+def test_absent_root_with_leaf_desired_sets_values() -> None:
+    deletes, sets = diff_tree(None, ["v"], _PATH, replace=False)
+
+    assert deletes == []
+    assert sets == [[*_PATH, "v"]]
+
+
+def test_leaf_at_root_empty_desired_never_deletes_in_replace() -> None:
+    active = select_subtree({"system": {"host-name": "r1"}}, ["system", "host-name"])
+
+    assert diff_tree(active, {}, ["system", "host-name"], replace=True) == ([], [])
+
+
+def test_leaf_at_root_empty_desired_never_deletes_in_merge() -> None:
+    active = select_subtree({"system": {"host-name": "r1"}}, ["system", "host-name"])
+
+    assert diff_tree(active, {}, ["system", "host-name"], replace=False) == ([], [])
+
+
+def test_replace_clears_a_leaf_root_where_a_subtree_is_desired() -> None:
+    deletes, sets = diff_tree(["leaf"], {"child": ["v"]}, _PATH, replace=True)
+
+    assert deletes == [[*_PATH]]
+    assert sets == [[*_PATH, "child", "v"]]
+
+
+def test_replace_clears_a_subtree_root_where_a_leaf_is_desired() -> None:
+    deletes, sets = diff_tree({"child": ["v"]}, ["leaf"], _PATH, replace=True)
+
+    assert deletes == [[*_PATH]]
+    assert sets == [[*_PATH, "leaf"]]
+
+
+def test_merge_leaf_root_where_a_subtree_is_desired_sets_only() -> None:
+    deletes, sets = diff_tree(["leaf"], {"child": ["v"]}, _PATH, replace=False)
+
+    assert deletes == []
+    assert sets == [[*_PATH, "child", "v"]]
+
+
+def test_merge_subtree_root_where_a_leaf_is_desired_sets_only() -> None:
+    deletes, sets = diff_tree({"child": ["v"]}, ["leaf"], _PATH, replace=False)
+
+    assert deletes == []
+    assert sets == [[*_PATH, "leaf"]]
+
+
+def test_diff_rejects_none_desired() -> None:
+    with pytest.raises(TreeError):
+        diff_tree(["v"], None, _PATH, replace=False)

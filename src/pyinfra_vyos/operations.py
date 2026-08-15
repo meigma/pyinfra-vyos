@@ -25,13 +25,19 @@ from pyinfra import host, state
 from pyinfra.api import FileUploadCommand, QuoteString, StringCommand, operation
 from pyinfra.api.exceptions import OperationValueError
 
-from pyinfra_vyos._cli import sg_probe, sg_vbash_run
+from pyinfra_vyos._cli import session_run_sequence, sg_probe, sg_vbash_run
 from pyinfra_vyos._parse import stream_is_nonempty
-from pyinfra_vyos._session import build_commands_script, build_load_script, staging_dir
+from pyinfra_vyos._session import (
+    PlannedCommand,
+    build_commands_script,
+    build_load_script,
+    build_save_script,
+    staging_dir,
+)
 from pyinfra_vyos._tree import TreeError, diff_tree, normalize_tree, select_subtree, validate_path
-from pyinfra_vyos.facts import Configuration
+from pyinfra_vyos.facts import Configuration, PendingSave
 
-__all__ = ["config", "config_load"]
+__all__ = ["config", "config_load", "config_save"]
 
 _T = TypeVar("_T")
 
@@ -252,7 +258,7 @@ def config(
         if active is None:
             host.noop(f"config path already absent: {label}")
             return
-        commands: list[list[str]] = [["delete", *path_tokens]]
+        commands: list[PlannedCommand] = [PlannedCommand(["delete", *path_tokens])]
     else:
         desired = _guarded(normalize_tree, values if values is not None else {}, strict=True)
         active = select_subtree(host.get_fact(Configuration), path_tokens)
@@ -260,16 +266,43 @@ def config(
         if not deletes and not sets:
             host.noop(f"config subtree already matches: {label}")
             return
-        commands = [["delete", *argv] for argv in deletes]
-        commands.extend(["set", *argv] for argv in sets)
+        commands = [PlannedCommand(["delete", *argv]) for argv in deletes]
+        commands.extend(PlannedCommand(["set", *argv]) for argv in sets)
 
     staging = staging_dir()
-    script_path = f"{staging}/session.sh"
+    script_text = build_commands_script(staging, commands, save=save)
+    yield from session_run_sequence(staging, script_text)
 
-    yield sg_probe()
-    yield StringCommand("mkdir", "-m", "700", QuoteString(staging))
-    yield FileUploadCommand(
-        StringIO(build_commands_script(staging, commands, save=save)), script_path
-    )
-    yield StringCommand("chmod", "600", QuoteString(script_path))
-    yield sg_vbash_run(script_path, staging)
+
+@operation()
+def config_save() -> Generator[StringCommand | FileUploadCommand, None, None]:
+    """Persist the active configuration to ``/config/config.boot``.
+
+    Save is device-global: it writes the complete active configuration to
+    ``/config/config.boot``, including unrelated active changes that were
+    already unsaved or arrived from another controller. The caller must
+    serialize or otherwise account for those changes; typed ownership does
+    not scope persistence.
+
+    **Verify-then-persist**: the recommended workflow for risky changes is
+    ``op(..., save=False)`` → verify reachability / facts →
+    :func:`config_save`. This operation is the second phase of that
+    workflow. It noops honestly when :class:`~pyinfra_vyos.facts.PendingSave`
+    is ``False``, fails closed when saved-state cannot be established
+    (``PendingSave`` ``None`` → :class:`~pyinfra.api.exceptions.OperationValueError`),
+    and otherwise saves idempotently.
+
+    **Concurrency precondition**: the caller MUST serialize all mutation
+    sessions per host — at most one mutation session may run at a time,
+    including runs from the same controller (§2 / D4). Overlapping
+    mutation runs are out of contract.
+    """
+
+    pending = host.get_fact(PendingSave)
+    if pending is None:
+        raise OperationValueError("saved-state could not be established")
+    if pending is False:
+        host.noop("configuration already saved")
+        return
+    staging = staging_dir()
+    yield from session_run_sequence(staging, build_save_script(staging))

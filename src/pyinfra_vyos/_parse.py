@@ -20,6 +20,8 @@ circinus, documented ``show version`` / ``show configuration``):
 - Fact commands emit a package-controlled trailing marker so empty stdout
   cannot masquerade as ``default()`` (pyinfra skips ``process()`` on empty
   stdout). The marker must be present as the last non-empty line.
+- The pending-save probe reduces the active-vs-boot comparison to a
+  nonnegative byte count: nonzero means unsaved changes, zero means none.
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ __all__ = [
     "ParseError",
     "config_command_lines",
     "parse_config_json",
+    "parse_pending_save",
     "parse_version",
     "stream_is_nonempty",
     "strip_marker",
@@ -124,6 +127,20 @@ def config_command_lines(lines: list[str]) -> list[str]:
         if stripped:
             rendered.append(stripped)
     return rendered
+
+
+def parse_pending_save(payload: str) -> bool:
+    """Return whether the reduced comparison output indicates unsaved changes.
+
+    *payload* is the ``wc -c`` byte count after the package marker is
+    stripped. A nonnegative integer is required: nonzero is True (diff
+    present), zero is False (no diff). Anything else is a parse failure.
+    """
+
+    text = payload.strip()
+    if not text.isdigit():
+        raise ParseError("pending-save probe output is not a nonnegative integer")
+    return int(text) != 0
 
 
 def stream_is_nonempty(fileobj: _SeekableStream) -> bool:

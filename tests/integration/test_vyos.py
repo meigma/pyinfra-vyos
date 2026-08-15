@@ -8,7 +8,14 @@ import pytest
 from pyinfra.api import FileUploadCommand, StringCommand
 from pyinfra.api.exceptions import OperationValueError
 
-from pyinfra_vyos import Configuration, ConfigurationCommands, Version, config, config_load
+from pyinfra_vyos import (
+    Configuration,
+    ConfigurationCommands,
+    Version,
+    config,
+    config_load,
+    config_save,
+)
 from pyinfra_vyos._cli import sg_probe, sg_vbash_run
 from pyinfra_vyos._session import SENTINEL_CHANGED
 
@@ -210,5 +217,18 @@ def test_config_save_propagates_into_the_uploaded_script() -> None:
         )
         return operation_commands(state)[2].src.getvalue()
 
-    assert "_save_out=$(save)" in script(True)
-    assert "_save_out=$(save)" not in script(False)
+    with_save = script(True)
+    without_save = script(False)
+    gate = 'if [ "$did_commit" -ne 0 ]; then'
+
+    assert "_save_out=$(save)" in with_save
+    assert gate in with_save
+    assert with_save.index(gate) < with_save.index("_save_out=$(save)")
+    assert "_save_out=$(save)" not in without_save
+
+
+def test_config_save_fails_closed_when_pending_save_is_unknown() -> None:
+    """@local has no vbash, so PendingSave is None and config_save fails closed."""
+
+    with pytest.raises(OperationValueError, match="saved-state could not be established"):
+        prepare(config_save)
