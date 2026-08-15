@@ -1,103 +1,106 @@
-"""Shared pyinfra harness and ``git`` CLI helpers for the integration suite.
+"""Shared pyinfra harness for the integration suite.
 
-Facts and operations run ``git`` on the target through pyinfra's ``@local``
-connector, which inherits the test process environment. The subprocess
-helpers here run the same CLI directly for independent state reads, so an
-assertion never confirms the code under test using the code under test.
-
-The four pyinfra helpers are the whole harness — copy them as-is into a real
-package; only the ``git``-specific helpers below them need replacing.
+Facts and operations run through pyinfra's real API. ``new_state`` defaults
+to the ``@local`` connector. Appliance tests pass an inventory from
+:func:`appliance_inventory`.
 """
 
 from __future__ import annotations
 
-import shutil
-import subprocess
+import os
 from typing import Any
 
-import pytest
 from pyinfra.api import Config, Inventory, State
 from pyinfra.api.connect import connect_all
 from pyinfra.api.facts import get_facts
 from pyinfra.api.operation import OperationMeta, add_op
 from pyinfra.api.operations import run_ops
+from pyinfra.context import ctx_host, ctx_state
 
 
-def new_state() -> State:
-    """Return a fresh connected pyinfra state over the ``@local`` connector."""
+def appliance_inventory() -> Inventory:
+    """Build a single-host SSH inventory from ``PYINFRA_VYOS_TEST_*`` env vars."""
 
-    state = State(inventory=Inventory((["@local"], {})), config=Config())
+    hostname = os.environ.get("PYINFRA_VYOS_TEST_HOST", "").strip()
+    if not hostname:
+        raise RuntimeError("PYINFRA_VYOS_TEST_HOST is not set")
+
+    data: dict[str, Any] = {}
+    user = os.environ.get("PYINFRA_VYOS_TEST_USER", "").strip()
+    if user:
+        data["ssh_user"] = user
+    port = os.environ.get("PYINFRA_VYOS_TEST_PORT", "").strip()
+    if port:
+        data["ssh_port"] = int(port)
+    key = os.environ.get("PYINFRA_VYOS_TEST_KEY", "").strip()
+    if key:
+        data["ssh_key"] = key
+
+    return Inventory(([hostname], {}), override_data=data)
+
+
+def new_state(inventory: Inventory | None = None) -> State:
+    """Return a fresh connected pyinfra state.
+
+    ``inventory`` defaults to the ``@local`` connector. A passed inventory is
+    cloned by name and override data so each state gets its own Host objects.
+    """
+
+    if inventory is None:
+        built = Inventory((["@local"], {}))
+    else:
+        names = [host.name for host in inventory]
+        built = Inventory((names, {}), override_data=dict(inventory.override_data))
+    state = State(inventory=built, config=Config())
     connect_all(state)
     return state
 
 
-def prepare(operation: Any, **kwargs: Any) -> tuple[State, OperationMeta]:
+def prepare(
+    operation: Any,
+    *,
+    inventory: Inventory | None = None,
+    **kwargs: Any,
+) -> tuple[State, OperationMeta]:
     """Run only the prepare phase (a pure dry run) of one operation."""
 
-    state = new_state()
+    state = new_state(inventory)
     results = add_op(state, operation, **kwargs)
     return state, next(iter(results.values()))
 
 
-def apply(operation: Any, **kwargs: Any) -> OperationMeta:
+def apply(
+    operation: Any,
+    *,
+    inventory: Inventory | None = None,
+    **kwargs: Any,
+) -> OperationMeta:
     """Prepare and execute one operation, returning its meta."""
 
-    state, meta = prepare(operation, **kwargs)
+    state, meta = prepare(operation, inventory=inventory, **kwargs)
     run_ops(state)
     return meta
 
 
-def fact_value(fact: Any, **kwargs: Any) -> Any:
-    """Return the single ``@local`` host's value for one fact."""
+def fact_value(
+    fact: Any,
+    *,
+    inventory: Inventory | None = None,
+    **kwargs: Any,
+) -> Any:
+    """Return the single inventory host's value for one fact."""
 
-    return next(iter(get_facts(new_state(), fact, kwargs=kwargs).values()))
-
-
-def try_git(*args: str) -> subprocess.CompletedProcess[str]:
-    """Run the ``git`` CLI directly, returning the result even on failure."""
-
-    binary = shutil.which("git")
-    if binary is None:
-        pytest.fail("the git CLI is unavailable")
-    return subprocess.run(
-        [binary, *args],
-        check=False,
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True,
-    )
+    return next(iter(get_facts(new_state(inventory), fact, kwargs=kwargs).values()))
 
 
-def run_git(*args: str) -> str:
-    """Run the ``git`` CLI directly, failing hard on a nonzero exit."""
+def operation_commands(state: State) -> list[Any]:
+    """Evaluate the prepared operation's command generator on the sole host.
 
-    result = try_git(*args)
-    if result.returncode != 0:
-        raise AssertionError(
-            f"git {' '.join(args)} failed ({result.returncode}): {result.stderr.strip()}",
-        )
-    return result.stdout
-
-
-def init_repository(path: str) -> str:
-    """Create a throwaway repository and return its path.
-
-    ``init.defaultBranch`` is set explicitly so the run is quiet and
-    deterministic regardless of the runner's git version or user config.
+    pyinfra's generator closes over the ``context.host`` / ``context.state``
+    proxies, so this must bind them the same way ``run_ops`` does.
     """
 
-    run_git("-c", "init.defaultBranch=main", "init", "--quiet", path)
-    return path
-
-
-def config_value(path: str, key: str) -> str | None:
-    """Read one repository-local config value, or ``None`` when it is unset.
-
-    ``git config --get`` exits 1 for a missing key, which is not a failure
-    here — it is the assertion that the key is gone.
-    """
-
-    result = try_git("-C", path, "config", "--local", "--get", key)
-    if result.returncode != 0:
-        return None
-    return result.stdout.rstrip("\n")
+    host = next(iter(state.inventory))
+    op_data = next(iter(state.ops[host].values()))
+    with ctx_state.use(state), ctx_host.use(host):
+        return list(op_data.command_generator())
