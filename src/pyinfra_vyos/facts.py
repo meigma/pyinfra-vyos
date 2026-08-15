@@ -136,10 +136,10 @@ class ConfigurationCommands(FactBase[list]):
 
     Runs ``show configuration commands`` through :func:`vyos_op_command`,
     which appends the package output marker. When ``strip_private`` is true,
-    the VyOS op-pipe tokens ``\\|`` and ``strip-private`` are appended as
-    ordinary argv — a VyOS op pipe, not a shell pipeline. :meth:`process`
-    requires and strips the marker, then keeps nonempty device-rendered
-    lines as-is.
+    output is piped through the target's ``strip-private`` filter script (a
+    real shell pipeline; the interactive op pipe is not available to
+    non-interactive ``run``). :meth:`process` requires and strips the
+    marker, then keeps nonempty device-rendered lines as-is.
 
     Unredacted output is secret-bearing. Returned fact values, verbose fact
     output, failed-fact combined output, and operation failure diagnostics
@@ -162,10 +162,13 @@ class ConfigurationCommands(FactBase[list]):
         return "vbash"
 
     def command(self, strip_private: bool = False) -> StringCommand:
-        argv: tuple[str, ...] = ("show", "configuration", "commands")
-        if strip_private:
-            argv = (*argv, r"\|", "strip-private")
-        return vyos_op_command(*argv, marker=OUTPUT_MARKER)
+        return vyos_op_command(
+            "show",
+            "configuration",
+            "commands",
+            marker=OUTPUT_MARKER,
+            strip_private=strip_private,
+        )
 
     @_fact_process
     def process(self, output: list[str]) -> list:

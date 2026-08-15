@@ -14,7 +14,8 @@ def test_vyos_op_command_wraps_argv_in_one_run_and_chains_the_marker() -> None:
     rendered = command.get_raw_value()
 
     assert rendered == (
-        "vbash -c 'export VYATTA_PAGER=cat\n"
+        "vbash -c 'set -o pipefail\n"
+        "export VYATTA_PAGER=cat\n"
         "source /opt/vyatta/etc/functions/script-template\n"
         "run show version && printf '\\''\\n%s\\n'\\'' PYINFRA_VYOS'"
     )
@@ -22,26 +23,29 @@ def test_vyos_op_command_wraps_argv_in_one_run_and_chains_the_marker() -> None:
     assert rendered.count("\nrun ") == 1
 
 
-def test_vyos_op_command_renders_op_pipe_tokens_literally() -> None:
-    """``\\|`` ``strip-private`` is a VyOS op pipe, not a shell pipeline."""
+def test_vyos_op_command_strip_private_is_a_real_shell_pipeline() -> None:
+    """The interactive op pipe is unavailable to non-interactive ``run``;
+    redaction pipes through the target's strip-private filter script, with
+    pipefail preserving the op-mode command's failure."""
 
     command = vyos_op_command(
         "show",
         "configuration",
         "commands",
-        r"\|",
-        "strip-private",
         marker="PYINFRA_VYOS",
+        strip_private=True,
     )
 
     rendered = command.get_raw_value()
     assert rendered == (
-        "vbash -c 'export VYATTA_PAGER=cat\n"
+        "vbash -c 'set -o pipefail\n"
+        "export VYATTA_PAGER=cat\n"
         "source /opt/vyatta/etc/functions/script-template\n"
-        "run show configuration commands \\| strip-private && "
+        "run show configuration commands | /usr/libexec/vyos/strip-private.py && "
         "printf '\\''\\n%s\\n'\\'' PYINFRA_VYOS'"
     )
     assert "\nsource /opt/vyatta/etc/functions/script-template\nrun " in rendered
+    assert "set -o pipefail" in rendered
 
 
 def test_sg_probe_closes_stdin_and_checks_the_substrate() -> None:

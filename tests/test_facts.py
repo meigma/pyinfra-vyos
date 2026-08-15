@@ -74,7 +74,8 @@ def test_version_fact_runs_show_version_with_one_run_and_marker() -> None:
     rendered = command.get_raw_value()
 
     assert rendered == (
-        "vbash -c 'export VYATTA_PAGER=cat\n"
+        "vbash -c 'set -o pipefail\n"
+        "export VYATTA_PAGER=cat\n"
         "source /opt/vyatta/etc/functions/script-template\n"
         f"run show version && printf '\\''\\n%s\\n'\\'' {OUTPUT_MARKER}'"
     )
@@ -106,7 +107,8 @@ def test_configuration_fact_runs_show_configuration_json() -> None:
     rendered = command.get_raw_value()
 
     assert rendered == (
-        "vbash -c 'export VYATTA_PAGER=cat\n"
+        "vbash -c 'set -o pipefail\n"
+        "export VYATTA_PAGER=cat\n"
         "source /opt/vyatta/etc/functions/script-template\n"
         "run show configuration json && "
         f"printf '\\''\\n%s\\n'\\'' {OUTPUT_MARKER}'"
@@ -144,33 +146,34 @@ def test_configuration_commands_fact_runs_show_configuration_commands() -> None:
     rendered = command.get_raw_value()
 
     assert rendered == (
-        "vbash -c 'export VYATTA_PAGER=cat\n"
+        "vbash -c 'set -o pipefail\n"
+        "export VYATTA_PAGER=cat\n"
         "source /opt/vyatta/etc/functions/script-template\n"
         "run show configuration commands && "
         f"printf '\\''\\n%s\\n'\\'' {OUTPUT_MARKER}'"
     )
     assert OUTPUT_MARKER in rendered
     assert rendered.count("\nrun ") == 1
-    assert r"\|" not in rendered
+    assert "strip-private" not in rendered
     assert "strip-private" not in rendered
 
 
-def test_configuration_commands_fact_renders_strip_private_op_pipe_tokens() -> None:
-    """``\\|`` ``strip-private`` is a VyOS op pipe, not a shell pipeline."""
+def test_configuration_commands_fact_pipes_through_strip_private_filter() -> None:
+    """Redaction is a real shell pipeline through the target's filter script."""
 
     command = ConfigurationCommands().command(strip_private=True)
     rendered = command.get_raw_value()
 
     assert rendered == (
-        "vbash -c 'export VYATTA_PAGER=cat\n"
+        "vbash -c 'set -o pipefail\n"
+        "export VYATTA_PAGER=cat\n"
         "source /opt/vyatta/etc/functions/script-template\n"
-        "run show configuration commands \\| strip-private && "
+        "run show configuration commands | /usr/libexec/vyos/strip-private.py && "
         f"printf '\\''\\n%s\\n'\\'' {OUTPUT_MARKER}'"
     )
     assert OUTPUT_MARKER in rendered
     assert rendered.count("\nrun ") == 1
-    assert r"\|" in rendered
-    assert "strip-private" in rendered
+    assert "| /usr/libexec/vyos/strip-private.py" in rendered
 
 
 def test_configuration_commands_fact_parses_marker_wrapped_set_form() -> None:
