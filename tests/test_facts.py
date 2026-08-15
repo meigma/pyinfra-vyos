@@ -74,11 +74,12 @@ def test_version_fact_runs_show_version_with_one_run_and_marker() -> None:
     rendered = command.get_raw_value()
 
     assert rendered == (
-        "vbash -c 'source /opt/vyatta/etc/functions/script-template; "
+        "vbash -c 'export VYATTA_PAGER=cat\n"
+        "source /opt/vyatta/etc/functions/script-template\n"
         f"run show version && printf '\\''\\n%s\\n'\\'' {OUTPUT_MARKER}'"
     )
     assert OUTPUT_MARKER in rendered
-    assert rendered.count(" run ") == 1
+    assert rendered.count("\nrun ") == 1
     assert command.get_masked_value() == rendered
 
 
@@ -105,12 +106,13 @@ def test_configuration_fact_runs_show_configuration_json() -> None:
     rendered = command.get_raw_value()
 
     assert rendered == (
-        "vbash -c 'source /opt/vyatta/etc/functions/script-template; "
+        "vbash -c 'export VYATTA_PAGER=cat\n"
+        "source /opt/vyatta/etc/functions/script-template\n"
         "run show configuration json && "
         f"printf '\\''\\n%s\\n'\\'' {OUTPUT_MARKER}'"
     )
     assert OUTPUT_MARKER in rendered
-    assert rendered.count(" run ") == 1
+    assert rendered.count("\nrun ") == 1
 
 
 def test_configuration_fact_parses_marker_wrapped_json() -> None:
@@ -142,12 +144,13 @@ def test_configuration_commands_fact_runs_show_configuration_commands() -> None:
     rendered = command.get_raw_value()
 
     assert rendered == (
-        "vbash -c 'source /opt/vyatta/etc/functions/script-template; "
+        "vbash -c 'export VYATTA_PAGER=cat\n"
+        "source /opt/vyatta/etc/functions/script-template\n"
         "run show configuration commands && "
         f"printf '\\''\\n%s\\n'\\'' {OUTPUT_MARKER}'"
     )
     assert OUTPUT_MARKER in rendered
-    assert rendered.count(" run ") == 1
+    assert rendered.count("\nrun ") == 1
     assert r"\|" not in rendered
     assert "strip-private" not in rendered
 
@@ -159,12 +162,13 @@ def test_configuration_commands_fact_renders_strip_private_op_pipe_tokens() -> N
     rendered = command.get_raw_value()
 
     assert rendered == (
-        "vbash -c 'source /opt/vyatta/etc/functions/script-template; "
+        "vbash -c 'export VYATTA_PAGER=cat\n"
+        "source /opt/vyatta/etc/functions/script-template\n"
         "run show configuration commands \\| strip-private && "
         f"printf '\\''\\n%s\\n'\\'' {OUTPUT_MARKER}'"
     )
     assert OUTPUT_MARKER in rendered
-    assert rendered.count(" run ") == 1
+    assert rendered.count("\nrun ") == 1
     assert r"\|" in rendered
     assert "strip-private" in rendered
 
