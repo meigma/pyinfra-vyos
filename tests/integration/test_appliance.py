@@ -74,7 +74,7 @@ def _with_static_host_mapping(config: str, hostname: str) -> str:
         "        }\n"
         "    }\n"
     )
-    return config[: match.end()] + block + config[match.end()]
+    return config[: match.end()] + block + config[match.end() :]
 
 
 def _assert_host_mapping(tree: dict[str, Any], hostname: str) -> None:
