@@ -44,17 +44,27 @@ def vyos_op_command(*argv: str, marker: str) -> StringCommand:
     """Wrap bare op-mode *argv* as a ``vbash -c`` script with a trailing marker.
 
     pyinfra executes via ``sh -c``, where VyOS op-mode commands do not exist.
-    This helper is the only place ``run`` is added: the inner script sources
-    script-template, invokes ``run <argv…>`` once, and on success emits
-    *marker* on its own line via ``printf`` chained with ``&&`` so the real
-    command's exit status propagates. Callers pass VyOS op-pipe tokens
-    (``\\|``, ``strip-private``) as ordinary argv; they are rendered
-    literally. The inner script as a whole is POSIX-single-quote-escaped for
-    the outer shell.
+    This helper is the only place ``run`` is added: the inner script exports
+    ``VYATTA_PAGER=cat``, sources script-template, invokes ``run <argv…>``
+    once, and on success emits *marker* on its own line via ``printf``
+    chained with ``&&`` so the real command's exit status propagates.
+
+    ``source`` and ``run`` are separate lines inside the ``-c`` payload.
+    ``run`` is a bash alias defined when script-template sources vyatta
+    completion; bash parses a semicolon-joined ``-c`` string as one unit
+    before that source executes, so the alias never expands (rc 127). A
+    newline lets bash parse line by line after the source has run.
+
+    Callers pass VyOS op-pipe tokens (``\\|``, ``strip-private``) as ordinary
+    argv; they are rendered literally. The inner script as a whole is
+    POSIX-single-quote-escaped for the outer shell.
+
+    The pager export stops ``less`` hanging when stdout is a PTY
+    (``_get_pty=True``). The pager pipeline can still mask the op-mode
+    return code under a PTY.
     """
 
     inner = StringCommand(
-        f"source {_SCRIPT_TEMPLATE};",
         "run",
         *argv,
         "&&",
@@ -62,7 +72,10 @@ def vyos_op_command(*argv: str, marker: str) -> StringCommand:
         "'\\n%s\\n'",
         marker,
     )
-    return StringCommand("vbash", "-c", _single_quote(inner.get_raw_value()))
+    script = (
+        f"export VYATTA_PAGER=cat\nsource {_SCRIPT_TEMPLATE}\n{inner.get_raw_value()}"
+    )
+    return StringCommand("vbash", "-c", _single_quote(script))
 
 
 def sg_probe() -> StringCommand:

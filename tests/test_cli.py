@@ -14,10 +14,12 @@ def test_vyos_op_command_wraps_argv_in_one_run_and_chains_the_marker() -> None:
     rendered = command.get_raw_value()
 
     assert rendered == (
-        "vbash -c 'source /opt/vyatta/etc/functions/script-template; "
+        "vbash -c 'export VYATTA_PAGER=cat\n"
+        "source /opt/vyatta/etc/functions/script-template\n"
         "run show version && printf '\\''\\n%s\\n'\\'' PYINFRA_VYOS'"
     )
-    assert rendered.count(" run ") == 1
+    assert "\nsource /opt/vyatta/etc/functions/script-template\nrun " in rendered
+    assert rendered.count("\nrun ") == 1
 
 
 def test_vyos_op_command_renders_op_pipe_tokens_literally() -> None:
@@ -32,11 +34,14 @@ def test_vyos_op_command_renders_op_pipe_tokens_literally() -> None:
         marker="PYINFRA_VYOS",
     )
 
-    assert command.get_raw_value() == (
-        "vbash -c 'source /opt/vyatta/etc/functions/script-template; "
+    rendered = command.get_raw_value()
+    assert rendered == (
+        "vbash -c 'export VYATTA_PAGER=cat\n"
+        "source /opt/vyatta/etc/functions/script-template\n"
         "run show configuration commands \\| strip-private && "
         "printf '\\''\\n%s\\n'\\'' PYINFRA_VYOS'"
     )
+    assert "\nsource /opt/vyatta/etc/functions/script-template\nrun " in rendered
 
 
 def test_sg_probe_closes_stdin_and_checks_the_substrate() -> None:

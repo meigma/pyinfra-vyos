@@ -120,9 +120,11 @@ def config_load(
     run at a time, including runs from the same controller (§2 / D4).
     Overlapping mutation runs are out of contract.
 
-    **Cleanup residual**: a pre-session upload failure or connector loss
-    strands the 0600/0700 staging directory in ``/tmp``. Paths that reach
-    session execution are cleaned up by the EXIT trap and by command 7.
+    **Cleanup residual**: any yielded command failing before the session
+    runs - an upload, a chmod, the remote non-whitespace guard - or
+    connector loss strands the 0600/0700 staging directory in ``/tmp``.
+    Paths that reach session execution are cleaned up by the EXIT trap
+    and by command 7.
 
     **Commit-verify-save**: a bad full config can sever SSH. Call with
     ``save=False``, verify reachability / facts, then call again with
