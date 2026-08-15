@@ -121,7 +121,7 @@ def config_load(
     Overlapping mutation runs are out of contract.
 
     **Cleanup residual**: any yielded command failing before the session
-    runs - an upload, a chmod, the remote non-whitespace guard - or
+    runs — an upload, a chmod, the remote non-whitespace guard — or
     connector loss strands the 0600/0700 staging directory in ``/tmp``.
     Paths that reach session execution are cleaned up by the EXIT trap
     and by command 7.
