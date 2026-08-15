@@ -16,7 +16,7 @@ import os
 
 import pytest
 
-_SKIP_REASON = "pass --integration to run tests against the local git CLI"
+_SKIP_REASON = "pass --integration to run tests against the @local pyinfra connector"
 _APPLIANCE_SKIP_REASON = (
     "pass --appliance and set PYINFRA_VYOS_TEST_HOST to run tests against a live VyOS appliance"
 )
@@ -27,7 +27,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "--integration",
         action="store_true",
         default=False,
-        help="run integration tests against the local git CLI",
+        help="run integration tests against the @local pyinfra connector",
     )
     parser.addoption(
         "--appliance",
