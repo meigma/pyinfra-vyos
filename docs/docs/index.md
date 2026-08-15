@@ -1,20 +1,21 @@
 ---
 title: pyinfra-vyos
 slug: /
-description: pyinfra facts and whole-config load for VyOS over SSH.
+description: pyinfra facts, whole-config load, and scoped subtree management for VyOS over SSH.
 ---
 
 # pyinfra-vyos
 
-`pyinfra-vyos` is a [pyinfra](https://pyinfra.com) plugin: facts plus a
-whole-config `config_load` operation for VyOS over SSH. Store a complete
-device config in git and load it as one unit, rather than issuing
-incremental `set` commands from the controller.
+`pyinfra-vyos` is a [pyinfra](https://pyinfra.com) plugin: facts plus two
+configuration operations for VyOS over SSH — a whole-config `config_load`
+and a scoped `config` for owned subtrees. Store a complete device config in
+git and load it as one unit, or declare just the subtrees you own, rather
+than issuing incremental `set` commands from the controller.
 
 Requires Python 3.11+ and pyinfra 3.9.2+. Targets need `vbash` and the VyOS
-script-template substrate; `config_load` additionally needs the connecting
-user to be able to `sg` into the `vyattacfg` group. Nothing is installed
-on the appliance.
+script-template substrate; the mutation operations additionally need the
+connecting user to be able to `sg` into the `vyattacfg` group. Nothing is
+installed on the appliance.
 
 ## Install
 
@@ -102,14 +103,50 @@ pyinfra inventory.py deploy_save.py
 
 `save` is keyword-only. `config_load(src, True)` is not a valid call.
 
+### Scoped subtree management
+
+`config` owns one config path and manages the subtree beneath it. `values`
+mirrors `show configuration json` shapes: nested dict for a subtree, `{}`
+for a valueless node, a string for a single-value leaf, a list for a
+multi-value leaf.
+
+```python
+# deploy_ntp.py
+from pyinfra_vyos import config
+
+config(
+    name="Manage NTP servers",
+    path=["service", "ntp"],
+    values={"server": {"time1.example.net": {}, "time2.example.net": {}}},
+    replace=True,
+    save=True,
+)
+```
+
+By default omitted state is unmanaged: only missing or differing desired
+values are `set` (merge). With `replace=True` the subtree becomes exactly
+`values` — extra active keys and leaf values are deleted, so choose the
+owned `path` carefully: a broad path with `replace=True` can remove
+management access. `present=False` deletes the whole path.
+
+The desired subtree is diffed against the active tree on the controller;
+an empty delta noops without touching the device, so pyinfra's change
+reporting is honest for this operation. Applied deltas are staged in one
+configure session and committed once behind the same `sessionChanged` gate
+as `config_load`. Every path token, key, and value must be a nonempty
+string that does not begin with `-`. Multi-value ordering is not managed.
+`save=True` persists only when this run commits; an empty delta noops
+regardless of `save`.
+
 ## Contracts
 
 These are user-facing, not internals:
 
-1. **Serialize `config_load` per host.** The caller must run at most one
-   mutation session at a time against a given device, including concurrent
-   runs from the same controller. Overlapping mutations are out of contract.
-   VyOS has no documented session lock; this package does not invent one.
+1. **Serialize mutations per host.** The caller must run at most one
+   mutation session (`config_load` or `config`) at a time against a given
+   device, including concurrent runs from the same controller. Overlapping
+   mutations are out of contract. VyOS has no documented session lock;
+   this package does not invent one.
 2. **Treat controller logs as sensitive.** Config output and facts
    (`Configuration`, unredacted `ConfigurationCommands`) can reach returned
    fact values, verbose fact output, failed-fact combined output, and
@@ -117,12 +154,15 @@ These are user-facing, not internals:
 3. **Supply a footer-bearing config.** Callers should ship a file that
    includes `// vyos-config-version` — the same footer `/config/config.boot`
    carries. The library does not detect or inject it.
-4. **pyinfra always reports the op changed.** `config_load` is marked
+4. **pyinfra always reports `config_load` changed.** It is marked
    `is_idempotent=False`: the executed command list is nonempty, so
    pyinfra's change flag is pessimistic. Device sentinels in operation
    stdout (`PYINFRA_VYOS changed` or `PYINFRA_VYOS noop`) are the truthful
    answer. A save-only run (no candidate diff, boot file still written)
-   reports `changed` via the sentinel, never `noop`.
+   reports `changed` via the sentinel, never `noop`. `config` noops
+   honestly via its controller-side diff; when it does send a delta the
+   device may still canonicalize it to a truthful `noop` sentinel — in
+   that case supply the device-canonical value form to stop the re-sends.
 
 ## Fact reference
 
@@ -153,7 +193,7 @@ are compatible.
 
 ```python
 from pyinfra_vyos.facts import Configuration, ConfigurationCommands, Version
-from pyinfra_vyos.operations import config_load
+from pyinfra_vyos.operations import config, config_load
 ```
 
 The same names are re-exported from `pyinfra_vyos`.
@@ -162,9 +202,12 @@ The same names are re-exported from `pyinfra_vyos`.
 a readable, seekable file-like object. A `str` is resolved against the
 deploy directory with the same rule pyinfra `files.put` uses.
 
+`config(path, values=None, *, replace=False, present=True, save=False)`
+takes the owned path as separate tokens and the desired subtree beneath it.
+
 ## Operator risks
 
-- **Stranded staging residual.** Each `config_load` uses a high-entropy
+- **Stranded staging residual.** Each mutation run uses a high-entropy
   directory `/tmp/pyinfra-vyos-<token>/` (mode 0700; files 0600). If a
   yielded command fails before the session runs — an upload, a chmod, the
   remote non-whitespace guard — or the SSH connector is lost, that
