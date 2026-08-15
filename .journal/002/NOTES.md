@@ -35,3 +35,34 @@ save=False)` in worktree `feat/configuration-op`.
   (commands embedded shlex-quoted in the 0600 uploaded script, off argv per
   C3), op named `config` (imperative-adjacent, avoids clashing with the
   `Configuration` fact; family: config_load, config).
+
+## 2026-08-15 13:35 — Scoped config op shipped to PR #8, hardware-verified
+Prototype complete in `feat/configuration-op`; PR #8 open.
+What was built: `_tree.py` (pure validate/select/diff, argv token safety per
+C2), `_session.py` refactor (shared prologue/commit-gate/epilogue +
+`build_commands_script`), `config` op, README/docs sections, 3 test tiers.
+Verification: unit 158 pass; @local 11 pass; appliance tier 5/5 against real
+VyOS 2026.03 — merge-create -> controller noop -> multi-value merge append ->
+replace-prune -> present=False delete -> delete-noop, sentinels and
+independent op-mode reads all correct, first attempt.
+Learned (wave-2 doc material):
+- The two-layer idempotency split works on hardware: controller diff decides
+  whether/what to send (honest host.noop), device sessionChanged stays the
+  truth gate. `config` is honestly idempotent in pyinfra terms, unlike
+  config_load.
+- Desired-values convention mirroring `show configuration json` shapes
+  (str/list/dict, {} valueless) diffs cleanly after normalizing both sides'
+  leaves to list[str]; static-host-mapping inet renders as a JSON list even
+  with one entry, confirming the normalize-both-sides approach.
+- Multi-value ordering deliberately unmanaged (set-equality); no appliance
+  pushback in this domain. Revisit if an order-significant node (name-server
+  etc.) bites.
+- Session skeleton generalized with zero appliance surprises — wave-1's
+  script contract is domain-independent; typed ops can be pure renderers
+  onto _tree diff + build_commands_script.
+- C3 subtlety worth keeping: per-command failure diagnostics must be
+  ordinal-only (values can be secrets); captured device output remains the
+  diagnostic.
+Open: wave-2 architecture doc (write from these learned decisions once PR #8
+lands); typed ops (system_basics, static_routes, ...) as renderers; scoped
+facts (ConfigExists/ConfigValue) only if the full-tree fact proves too heavy.
