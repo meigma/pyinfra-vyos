@@ -88,3 +88,14 @@ degraded run could persist unrelated unsaved state (D13). Decisions numbered
 D6-D13 continuing wave-1.
 Next: implement per §1 cut order (config_save + access path first, firewall
 pair second).
+
+## 2026-08-15 14:40 — Implementation plan landed
+Planner agent produced `.journal/002/PLAN.md` implementing the accepted
+wave-2 architecture verbatim (first attempt returned a JSON summary; re-ran
+with a document schema). 8 PR-sized phases following the architecture cut
+order: (1) substrate extensions + config_save (incl. §12 Q1 fact-cache
+verification and Q2 rejected-commit appliance probe), (2) _render seam +
+_plan_scopes + system_basics, (3) interface, (4) static_route, (5) user,
+(6) firewall_group, (7) firewall_ruleset, (8) docs. Each phase carries
+file-level targets, tests per the §11 contract, and risks; §12 open
+questions mapped to resolving steps (Q1->1.1, Q2->1.8, Q3->2.6, Q4->3.2).
