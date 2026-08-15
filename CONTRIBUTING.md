@@ -1,8 +1,7 @@
 # Contributing
 
 Thank you for your interest in contributing.
-This repository is a pyinfra plugin template, so changes should keep the
-generated-project path simple and predictable.
+This repository is a pyinfra plugin package for VyOS.
 For private vulnerability reporting, use [SECURITY.md](SECURITY.md) instead of
 public channels.
 
@@ -27,11 +26,11 @@ Contributors should:
 
 1. Keep changes focused and scoped to a single problem.
 2. Add or update tests when behavior changes. New facts and operations need
-   unit tests; anything touching command construction or idempotency also needs
-   an integration test that applies the deploy twice.
+   unit tests; command construction and prepare-phase behavior also need
+   `@local` integration coverage.
 3. Update documentation when user-facing behavior changes.
-4. Use Conventional Commit subjects, such as `feat: add config_entry operation`
-   or `fix: rejoin null-separated fact output`.
+4. Use Conventional Commit subjects, such as `feat: add config_load operation`
+   or `fix: strip output marker before parsing`.
 5. Make sure `moon run root:check` passes before requesting review.
 
 ## Local Setup

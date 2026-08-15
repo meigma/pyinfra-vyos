@@ -115,6 +115,14 @@ def config_load(
     remote grep in the yielded sequence is the enforcing check. pyinfra
     ``seek(0)``s file-like sources on execute.
 
+    **Config-version footer**: VyOS ``load`` runs its migrators on every
+    uploaded file and treats a config without a ``// vyos-config-version``
+    footer as version 0, executing the full historical migration chain
+    against it. Callers SHOULD supply a footer-bearing config (anything
+    saved by VyOS — ``/config/config.boot``, ``save <file>`` output —
+    carries it; bare ``show configuration`` output does not). The library
+    does not detect or inject the footer; documented, not enforced.
+
     **Concurrency precondition**: the caller MUST serialize all
     ``config_load`` mutations per host — at most one mutation session may
     run at a time, including runs from the same controller (§2 / D4).
