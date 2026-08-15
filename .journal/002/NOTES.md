@@ -66,3 +66,25 @@ Learned (wave-2 doc material):
 Open: wave-2 architecture doc (write from these learned decisions once PR #8
 lands); typed ops (system_basics, static_routes, ...) as renderers; scoped
 facts (ConfigExists/ConfigValue) only if the full-tree fact proves too heavy.
+
+## 2026-08-15 14:20 — PR #8 merged; wave-2 architecture accepted
+PR #8 squash-merged to main (bf1e9a9); feat worktree pruned.
+Ran software-architect + architecture-reviewer pipeline (two review rounds as
+capped): draft -> revise (round-1 verdict: revise) -> final amendments
+(round-2 verdict: accept-with-notes, notes applied). Result committed as
+`.journal/002/ARCHITECTURE.md`.
+Headlines: 7 ops in wave 2 (system_basics, interface, static_route,
+firewall_group, firewall_ruleset, user, config_save); nat_rule deferred
+(pure `config` replace at a numbered key). Typed ops are pure renderers ->
+Scope algebra (Absent/Exact/Merge + sensitivity carrier) over shipped
+diff/session substrate (D6/D8). Full-tree Configuration fact retained, new
+PendingSave fact (tri-state, fails closed) for config_save (D7/D13). Thin
+version gate schema_key() seam, fail-closed on unknown versions (D9).
+Shallow-typed + open-body models with typed-key collision rejection (D10).
+user op: encrypted-hash-only, sensitive-scope output suppression, deletion
+guard on remote identity (D11). Save gated on did_commit in
+build_commands_script — fixes a real shipped gap where a canonicalization-
+degraded run could persist unrelated unsaved state (D13). Decisions numbered
+D6-D13 continuing wave-1.
+Next: implement per §1 cut order (config_save + access path first, firewall
+pair second).
