@@ -1,32 +1,36 @@
-"""Custom pyinfra facts and operations packaged as a reusable plugin.
+"""VyOS facts and operations packaged as a reusable pyinfra plugin.
 
-The primitives exported here are a **sample domain** — repository-local
-``git config`` management — chosen because ``git`` exists everywhere, needs
-no daemon, and has natural idempotency (read config, diff, set or unset).
-They exist to be molded into a real package, not kept.
+The primitives exported here are the wave-1 substrate: a whole-config load
+operation and three op-mode facts, all over ``sg vyattacfg`` + ``/bin/vbash``
++ script-template. Callers compose SOPS, templating, backup, and verification
+on top; this package does not.
 
-Layer map, in the order to replace them:
+Layer map:
 
-- ``facts.py`` — public :class:`~pyinfra.api.FactBase` classes only.
-- ``operations.py`` — public ``@operation`` functions only.
-- ``_gitconfig.py`` — the pure domain: parse, diff, build commands. No I/O
-  and no pyinfra state, which is what keeps the unit tests mock-free.
-- ``_cli.py`` — the one place commands are assembled, and the one place the
-  quoting and option-lookalike rules live. Keep this layer when the domain
-  changes; only the binary name and its flags should move.
+- ``facts.py`` — public :class:`~pyinfra.api.FactBase` classes only:
+  :class:`Version`, :class:`Configuration`, :class:`ConfigurationCommands`.
+- ``operations.py`` — public ``@operation`` functions only: :func:`config_load`.
+- ``_session.py`` — the pure domain for the session half: script text,
+  sentinels, and the high-entropy staging path. No I/O and no pyinfra state.
+- ``_parse.py`` — the pure domain for the parse half: ``show version`` /
+  config-JSON / command-line parsers, marker strip, streaming non-empty
+  check. No I/O and no pyinfra state.
+- ``_cli.py`` — the one place target commands are assembled
+  (``vyos_op_command``, ``sg_probe``, ``sg_vbash_run``).
 
 Facts and operations are ordinary importable modules: pyinfra discovers only
 connectors through entry points, so nothing here needs registration. Deploys
 import them directly::
 
-    from pyinfra_vyos import GitConfig, config_entry
+    from pyinfra_vyos import Version, Configuration, ConfigurationCommands, config_load
 """
 
-from pyinfra_vyos.facts import GitConfig, GitVersion
-from pyinfra_vyos.operations import config_entry
+from pyinfra_vyos.facts import Configuration, ConfigurationCommands, Version
+from pyinfra_vyos.operations import config_load
 
 __all__ = [
-    "GitConfig",
-    "GitVersion",
-    "config_entry",
+    "Version",
+    "Configuration",
+    "ConfigurationCommands",
+    "config_load",
 ]
