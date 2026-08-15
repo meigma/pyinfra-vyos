@@ -66,7 +66,7 @@ All run bare op-mode argv through `vyos_op_command()` (pyinfra executes via `sh 
 |---|---|---|---|
 | `Version` | `show version` | first-colon split per line; require `version` key | `{}` |
 | `Configuration` | `show configuration json` | `json.loads`, top-level dict check; raw tree, no normalization | `{}` |
-| `ConfigurationCommands` | `show configuration commands` (+ literal escaped `\|` `strip-private` argument — a VyOS op pipe, not a shell pipeline — when `strip_private=True` on `command()`) | device-rendered nonempty lines preserved as-is (no normalization without fixtures) | `[]` |
+| `ConfigurationCommands` | `show configuration commands` (+ shell pipeline through `/usr/libexec/vyos/strip-private.py` under `set -o pipefail` when `strip_private=True` on `command()`; amended after appliance testing — the interactive `\| strip-private` op pipe is grammar of the interactive op-mode runner only, and non-interactive `run` rejects `\|` argv with `Invalid command: [\|]`) | device-rendered nonempty lines preserved as-is (no normalization without fixtures) | `[]` |
 
 **Secret boundary, honestly stated**: `Configuration` and unredacted `ConfigurationCommands` are secret-bearing (R§1.5). The library cannot enforce "never log": returned fact values, verbose fact output, failed-fact combined output, and operation failure diagnostics can all reach controller logs. The contract is: the library keeps failure output minimal and never prints config diffs; callers must treat controller logs as sensitive. `strip_private` output is documented as not restore-faithful.
 

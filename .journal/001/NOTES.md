@@ -66,3 +66,16 @@ Next: session close when user asks; wave 2 (typed ops) unstarted by design.
 
 ## 2026-08-14 22:20 — Release app credentials uploaded and proven
 Resolves the 21:58 OPEN FLAG. Per user: read `meigma-release-please` item from 1Password `Development` vault via `op` — field `app_id` (3342783) set as repo variable MEIGMA_RELEASE_APP_ID, file attachment `key.pem` piped to repo secret MEIGMA_RELEASE_APP_PRIVATE_KEY (never written to disk or logs). Verified end-to-end: RS256 JWT signed with the key authenticates to GitHub as app `meigma-release-please` (1 installation). Debugging note: initial verification false-failed because `python - <<EOF` heredoc stole stdin from the key pipe — cryptography parsed an empty string (MalformedFraming); rerun with `python -c` proved the key valid. All release prerequisites now closed; only appliance fixture recapture remains on backlog.
+
+## 2026-08-15 09:30 — Lima appliance lab built; appliance tier passes on real VyOS (PR #6)
+Per user request: Lima-powered harness at `tests/appliance/` (branch test/lima-harness, PR #6 open). Research (agent, cited): free VyOS images are amd64 ISOs only (no arm64/qcow2); Lima's cloud-init can't provision VyOS (module mismatch); Lima `plain` mode + prepared qcow2 + QEMU hostfwd SSH is the workable shape. Chose VyOS Stream 2026.03 (circinus/1.5 lineage, matches fixture target).
+Harness: `vyos-lab build|up|env|test|down`; build-image.sh does one-time expect-driven serial-console `install image` + config (DHCP/SSH/Lima key on vyos user) from the pinned SHA-256-verified ISO; ~4 min warm build under TCG. Readiness = own SSH probe (limactl start always times out on its cloud-init boot-script requirement; guest is healthy).
+Hard-won appliance facts recorded for posterity:
+- VyOS pins NIC MAC as `hw-id` at commit; a different MAC at next boot → "vyos-config: Configuration error" and no SSH. Harness strips hw-id from config.boot post-save.
+- The default ISO GRUB entry already boots a serial getty; no menu interaction needed.
+- Installer prompt grammar taken from vyos-1x image_installer.py + utils/io.py; naive `:`-tail expect fallbacks answer informational lines and break destructive-confirm prompts.
+Two library bugs found ONLY by real hardware (fixed in PR #6, 61dd3fb):
+1. conftest keywords-vs-marker: `"integration" in item.keywords` matches the tests/integration directory name → appliance tests unrunnable without --integration. Now get_closest_marker.
+2. strip-private op pipe: `\|` argv is rejected by non-interactive `run` (Invalid command: [|]); real form is a shell pipeline through /usr/libexec/vyos/strip-private.py with pipefail (verified redacting on-device). ARCHITECTURE §3 table amended.
+Verification: appliance tier 4/4 PASSED against the Lima VM (facts + config_load changed→noop→save cycle on VyOS 2026.03 circinus); root:check + test-integration green; real `show version` fixture captured (backlog item satisfied).
+Next: PR #6 awaiting human approval; lab VM left running (pyinfra-vyos Lima instance).
