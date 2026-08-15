@@ -3,6 +3,8 @@ name = "pyinfra-vyos"
 version = "0.1.0"
 description = "pyinfra facts and operations for VyOS routers"
 readme = "README.md"
+license = "MIT OR Apache-2.0"
+license-files = ["LICENSE-APACHE", "LICENSE-MIT"]
 authors = [
     { name = "Meigma" }
 ]
