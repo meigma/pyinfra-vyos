@@ -34,6 +34,7 @@ dev = [
 testpaths = ["tests"]
 markers = [
     "integration: requires network/local tool access",
+    "appliance: requires a live VyOS appliance (--appliance and PYINFRA_VYOS_TEST_HOST)",
 ]
 
 [tool.ruff]
