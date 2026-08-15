@@ -56,3 +56,10 @@ Phase E verification on main a464a6f: root:check green (13 tasks), test-integrat
 Outstanding [USER] items before first publish: LICENSE, PyPI pending publisher (release.yml/pypi env), MEIGMA_RELEASE_APP_ID/KEY, configure_github_repo.py plan+apply (is_template still true).
 Backlog: appliance-capture real 1.4/1.5 fixtures (tests/integration/_captures/), reviewer note on config.boot restore semantics documented in PR #3.
 Next: session close when user asks; wave 2 (typed ops) unstarted by design.
+
+## 2026-08-14 21:58 — Release prerequisites closed out
+- PR #5 `chore: dual-license under Apache-2.0 and MIT` (d1949e4): LICENSE-APACHE + LICENSE-MIT, PEP 639 `license = "MIT OR Apache-2.0"` + license-files (verified in wheel METADATA: License-Expression + both License-File entries in dist-info/licenses/), README dual-license section with contribution clause, repository-settings.toml is_template flipped to false (was true; applying as-shipped would have re-templated the repo).
+- User confirmed done: PyPI pending publisher + `pypi` environment (verified via API). meigma-release-please app installed org-wide.
+- Repository settings applied via configure_github_repo.py (run by agent per user): general settings, immutable releases, private vuln reporting, security fixes, Pages (cert-provisioning race on first apply; second apply converged, https_enforced=true), branch ruleset "Default branch", tag ruleset "Default tags". Second plan run shows no drift. API-unsupported toggles remain manual (Archive Program, dependency submission, etc. — listed by the script).
+- OPEN FLAG for user: org-level Actions variables and secrets both list empty via API — release.yml needs MEIGMA_RELEASE_APP_ID (var) and MEIGMA_RELEASE_APP_PRIVATE_KEY (secret) visible to this repo; app *installation* alone doesn't provide them. If they exist at org level but hidden from this token, ignore; otherwise first release PR will fail at token minting.
+- Remaining: appliance fixture recapture (backlog). Release path is otherwise live: conventional commits → Release Please PR → merge → draft release/tag → rehearsed publish → human publishes draft.
