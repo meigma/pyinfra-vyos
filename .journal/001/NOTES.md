@@ -82,3 +82,6 @@ Next: PR #6 awaiting human approval; lab VM left running (pyinfra-vyos Lima inst
 
 ## 2026-08-15 12:39 — PR #6 merged; lab VM torn down
 User approved; squash-merged as `test: add lima-powered vyos appliance lab` (5973734). Lima instance deleted via `vyos-lab down` (qcow2 cache kept in ~/.cache/pyinfra-vyos for instant re-up). Worktree removed. All backlog items closed; wave 1 fully shipped and hardware-verified.
+
+## 2026-08-15 12:43 — Wave-2 research persisted
+User asked where wave-2 intent lives; the full cited research report (prioritized ops/facts with feasibility, next-wave/constrained/skip lists, 1.4/1.5 drift notes) existed only as a session artifact. Copied to `.journal/001/RESEARCH.md` with a header noting wave-1 shipped and the two on-hardware corrections (strip-private pipe, hw-id pinning). Wave-2 map now durable: RESEARCH.md (what+why) + ARCHITECTURE.md §5 (how it bolts on).
