@@ -1,10 +1,17 @@
-"""Whole-config load executed through each host's pyinfra connector.
+"""Config mutations executed through each host's pyinfra connector.
 
 :func:`config_load` uploads a rendered config and runs one ``sg vyattacfg``
 session that loads, compare-gates, and optionally saves. There is no
 prepare-time diff: the device's ``load`` + ``sessionChanged`` result is the
 authority (D3), so this operation always yields commands and pyinfra always
 reports it changed.
+
+:func:`config` owns a scoped subtree instead: it diffs the caller's desired
+values against the active tree (the :class:`~pyinfra_vyos.facts.Configuration`
+fact) on the controller, noops on an empty delta, and otherwise applies the
+``set`` / ``delete`` delta in one session behind the same ``sessionChanged``
+commit gate — the device stays the authority on whether anything actually
+changed.
 """
 
 from __future__ import annotations
@@ -14,15 +21,17 @@ from collections.abc import Callable, Generator
 from io import StringIO
 from typing import IO, Any, TypeVar
 
-from pyinfra import state
+from pyinfra import host, state
 from pyinfra.api import FileUploadCommand, QuoteString, StringCommand, operation
 from pyinfra.api.exceptions import OperationValueError
 
 from pyinfra_vyos._cli import sg_probe, sg_vbash_run
 from pyinfra_vyos._parse import stream_is_nonempty
-from pyinfra_vyos._session import build_load_script, staging_dir
+from pyinfra_vyos._session import build_commands_script, build_load_script, staging_dir
+from pyinfra_vyos._tree import TreeError, diff_tree, normalize_tree, select_subtree, validate_path
+from pyinfra_vyos.facts import Configuration
 
-__all__ = ["config_load"]
+__all__ = ["config", "config_load"]
 
 _T = TypeVar("_T")
 
@@ -31,7 +40,7 @@ class _SourceError(Exception):
     """Rejected ``config_load`` src; translated to OperationValueError."""
 
 
-_DOMAIN_ERRORS = (_SourceError,)
+_DOMAIN_ERRORS = (_SourceError, TreeError)
 
 
 def _guarded(function: Callable[..., _T], *args: Any, **kwargs: Any) -> _T:
@@ -164,5 +173,103 @@ def config_load(
         QuoteString(config_path),
     )
     yield FileUploadCommand(StringIO(build_load_script(staging, save=save)), script_path)
+    yield StringCommand("chmod", "600", QuoteString(script_path))
+    yield sg_vbash_run(script_path, staging)
+
+
+@operation()
+def config(
+    path: list[str] | tuple[str, ...],
+    values: dict[str, Any] | None = None,
+    *,
+    replace: bool = False,
+    present: bool = True,
+    save: bool = False,
+) -> Generator[StringCommand | FileUploadCommand, None, None]:
+    """Configure an owned subtree of the VyOS config tree.
+
+    ``path`` is the owned config path as separate tokens, e.g.
+    ``["service", "ntp"]``. ``values`` is the desired subtree beneath it,
+    mirroring ``show configuration json`` shapes: nested ``dict`` for a
+    subtree, ``{}`` for a valueless node, ``str`` for a single-value leaf,
+    ``list[str]`` for a multi-value leaf. ``values=None`` means "ensure the
+    bare path node exists".
+
+    **Ownership**: by default omitted state is unmanaged — only ``set``
+    commands for missing or differing desired values are applied (merge).
+    With ``replace=True`` the subtree under ``path`` becomes exactly
+    ``values``: active keys and leaf values absent from ``values`` are
+    deleted. Choose the owned ``path`` accordingly; a broad path with
+    ``replace=True`` can remove management access. ``present=False``
+    deletes the whole path (``values`` and ``replace`` must be left unset).
+
+    **Idempotency**: the desired subtree is diffed against the active tree
+    (:class:`~pyinfra_vyos.facts.Configuration`) on the controller; an empty
+    delta noops without touching the device. When commands are applied, the
+    session's ``sessionChanged`` gate remains the authority: if the device
+    canonicalizes the supplied values into what is already active, the
+    session truthfully reports the ``noop`` sentinel (and the controller
+    diff will re-emit the delta on every run until the caller supplies the
+    device-canonical form). Multi-value leaves compare as unordered sets;
+    value ordering is not managed.
+
+    **Value constraints**: every path token, key, and value must be a
+    nonempty string that does not begin with ``-`` (they become device-side
+    ``set`` / ``delete`` argv). Secret-bearing values travel inside the
+    uploaded 0600 session script, never on process argv; on failure the
+    library logs only the command ordinal and verb, plus device output.
+
+    **Atomicity**: the whole delta is staged in one configure session and
+    committed once, so dependent fields under the owned path validate
+    together. ``save=True`` persists only when this run commits; an empty
+    delta noops regardless of ``save``.
+
+    **Concurrency precondition**: as with :func:`config_load`, the caller
+    MUST serialize all mutation sessions per host (§2 / D4).
+
+    **Example**:
+
+    .. code:: python
+
+        config(
+            name="Manage NTP servers",
+            path=["service", "ntp"],
+            values={"server": {"time1.example.net": {}, "time2.example.net": {}}},
+            replace=True,
+            save=True,
+        )
+    """
+
+    path_tokens = _guarded(validate_path, path)
+    label = " ".join(path_tokens)
+
+    if not present:
+        if values is not None:
+            raise OperationValueError("values must be omitted when present=False")
+        if replace:
+            raise OperationValueError("replace has no meaning when present=False")
+        active = select_subtree(host.get_fact(Configuration), path_tokens)
+        if active is None:
+            host.noop(f"config path already absent: {label}")
+            return
+        commands: list[list[str]] = [["delete", *path_tokens]]
+    else:
+        desired = _guarded(normalize_tree, values if values is not None else {}, strict=True)
+        active = select_subtree(host.get_fact(Configuration), path_tokens)
+        deletes, sets = diff_tree(active, desired, path_tokens, replace=replace)
+        if not deletes and not sets:
+            host.noop(f"config subtree already matches: {label}")
+            return
+        commands = [["delete", *argv] for argv in deletes]
+        commands.extend(["set", *argv] for argv in sets)
+
+    staging = staging_dir()
+    script_path = f"{staging}/session.sh"
+
+    yield sg_probe()
+    yield StringCommand("mkdir", "-m", "700", QuoteString(staging))
+    yield FileUploadCommand(
+        StringIO(build_commands_script(staging, commands, save=save)), script_path
+    )
     yield StringCommand("chmod", "600", QuoteString(script_path))
     yield sg_vbash_run(script_path, staging)

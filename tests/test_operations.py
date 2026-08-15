@@ -15,7 +15,7 @@ from pyinfra.context import ctx_state
 import pyinfra_vyos
 from pyinfra_vyos._cli import sg_probe, sg_vbash_run
 from pyinfra_vyos._session import SENTINEL_CHANGED
-from pyinfra_vyos.operations import _guarded, _SourceError, config_load
+from pyinfra_vyos.operations import _guarded, _SourceError, config, config_load
 
 _VALID_CONFIG = "set system host-name pyinfra-vyos\n"
 _WHITESPACE_ONLY = "  \n\t\n  "
@@ -75,11 +75,56 @@ def test_config_load_is_marked_not_idempotent() -> None:
     )
 
 
-def test_package_exports_the_wave1_primitives() -> None:
+def test_config_signature_keeps_flags_keyword_only() -> None:
+    parameters = inspect.signature(config).parameters
+
+    keyword_only = [name for name, p in parameters.items() if p.kind is p.KEYWORD_ONLY]
+    assert keyword_only == ["replace", "present", "save"]
+    assert parameters["values"].default is None
+    assert parameters["replace"].default is False
+    assert parameters["present"].default is True
+    assert parameters["save"].default is False
+
+
+def test_config_is_idempotent_via_controller_diff() -> None:
+    assert config.is_idempotent is True
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"path": []},
+        {"path": "system"},
+        {"path": ["system", "-x"]},
+        {"path": ["system"], "values": {"key": 7}},
+        {"path": ["system"], "values": {"-dash": "v"}},
+        {"path": ["system"], "values": "not-a-dict"},
+    ],
+)
+def test_config_input_rejections_surface_before_any_host_access(kwargs: dict[str, Any]) -> None:
+    """Validation raises OperationValueError before host.get_fact is reached.
+
+    These run without pyinfra host context: reaching the fact lookup would
+    raise a context error instead, so passing proves validation comes first.
+    """
+
+    with pytest.raises(OperationValueError):
+        list(config._inner(**kwargs))
+
+
+def test_config_present_false_rejects_values_and_replace() -> None:
+    with pytest.raises(OperationValueError, match="values"):
+        list(config._inner(path=["system"], values={}, present=False))
+    with pytest.raises(OperationValueError, match="replace"):
+        list(config._inner(path=["system"], replace=True, present=False))
+
+
+def test_package_exports_the_public_primitives() -> None:
     assert pyinfra_vyos.__all__ == [
         "Configuration",
         "ConfigurationCommands",
         "Version",
+        "config",
         "config_load",
     ]
     for exported in pyinfra_vyos.__all__:

@@ -10,7 +10,7 @@ import pytest
 from pyinfra.api import Inventory, StringCommand
 from pyinfra.api.operation import OperationMeta
 
-from pyinfra_vyos import Configuration, ConfigurationCommands, Version, config_load
+from pyinfra_vyos import Configuration, ConfigurationCommands, Version, config, config_load
 from pyinfra_vyos._cli import vyos_op_command
 from pyinfra_vyos._parse import OUTPUT_MARKER, strip_marker
 from pyinfra_vyos._session import SENTINEL_CHANGED, SENTINEL_NOOP
@@ -169,3 +169,59 @@ def test_config_load_commit_noop_and_save_cycle(
         finally:
             original_path.unlink(missing_ok=True)
             mutated_path.unlink(missing_ok=True)
+
+
+def test_config_scoped_merge_replace_delete_cycle(inventory: Inventory) -> None:
+    """Exercise the scoped op end to end: merge-create, controller noop,
+    replace-swap, and present=False delete, verified through an independent
+    op-mode read (T2) with a second-apply noop at each mutation (T3).
+
+    save=False throughout: commits touch only the active config, so the boot
+    config never changes and a crashed run cannot survive a reboot. The save
+    epilogue is shared, load-cycle-verified code.
+    """
+
+    hostname = f"pyinfra-config-{secrets.token_hex(8)}.invalid"
+    path = ["system", "static-host-mapping", "host-name", hostname]
+
+    def active_mapping() -> dict[str, Any] | None:
+        tree = fact_value(Configuration, inventory=inventory)
+        return (
+            tree.get("system", {}).get("static-host-mapping", {}).get("host-name", {}).get(hostname)
+        )
+
+    try:
+        first = apply(config, inventory=inventory, path=path, values={"inet": "192.0.2.53"})
+        assert first.did_change()
+        _assert_sentinel(first, SENTINEL_CHANGED)
+        assert active_mapping() == {"inet": ["192.0.2.53"]}
+
+        second = apply(config, inventory=inventory, path=path, values={"inet": "192.0.2.53"})
+        assert not second.did_change()
+
+        merged = apply(config, inventory=inventory, path=path, values={"inet": "192.0.2.54"})
+        assert merged.did_change()
+        _assert_sentinel(merged, SENTINEL_CHANGED)
+        assert active_mapping() == {"inet": ["192.0.2.53", "192.0.2.54"]}
+
+        replaced = apply(
+            config, inventory=inventory, path=path, values={"inet": "192.0.2.54"}, replace=True
+        )
+        assert replaced.did_change()
+        _assert_sentinel(replaced, SENTINEL_CHANGED)
+        assert active_mapping() == {"inet": ["192.0.2.54"]}
+
+        replaced_again = apply(
+            config, inventory=inventory, path=path, values={"inet": "192.0.2.54"}, replace=True
+        )
+        assert not replaced_again.did_change()
+
+        deleted = apply(config, inventory=inventory, path=path, present=False)
+        assert deleted.did_change()
+        _assert_sentinel(deleted, SENTINEL_CHANGED)
+        assert active_mapping() is None
+
+        deleted_again = apply(config, inventory=inventory, path=path, present=False)
+        assert not deleted_again.did_change()
+    finally:
+        apply(config, inventory=inventory, path=path, present=False)

@@ -8,7 +8,7 @@ import pytest
 from pyinfra.api import FileUploadCommand, StringCommand
 from pyinfra.api.exceptions import OperationValueError
 
-from pyinfra_vyos import Configuration, ConfigurationCommands, Version, config_load
+from pyinfra_vyos import Configuration, ConfigurationCommands, Version, config, config_load
 from pyinfra_vyos._cli import sg_probe, sg_vbash_run
 from pyinfra_vyos._session import SENTINEL_CHANGED
 
@@ -133,3 +133,82 @@ def test_save_true_propagates_into_the_uploaded_script(sample_config: str) -> No
     assert SENTINEL_CHANGED in without_save
     assert "_save_out=$(save)" not in without_save
     assert "did_save=1" not in without_save
+
+
+def test_config_prepare_renders_the_five_command_sequence() -> None:
+    """@local has no vbash, so Configuration returns default() ({}): every
+    desired value is missing and the prepared delta is pure sets."""
+
+    state, meta = prepare(
+        config,
+        path=["system", "static-host-mapping", "host-name", "a.test"],
+        values={"inet": "192.0.2.1"},
+    )
+    commands = operation_commands(state)
+
+    assert meta.will_change
+    assert len(commands) == 5
+    probe, mkdir, upload, chmod, run = commands
+    assert isinstance(probe, StringCommand)
+    assert probe.get_raw_value() == sg_probe().get_raw_value()
+    assert mkdir.get_raw_value().startswith("mkdir -m 700 ")
+    assert isinstance(upload, FileUploadCommand)
+    assert upload.dest.endswith("/session.sh")
+    assert isinstance(upload.src, StringIO)
+    script = upload.src.getvalue()
+    assert "set system static-host-mapping host-name a.test inet 192.0.2.1" in script
+    assert "delete" not in script.replace("_cmd", "")
+    assert chmod.get_raw_value().startswith("chmod 600 ")
+    rendered = run.get_raw_value()
+    assert rendered == sg_vbash_run(upload.dest, upload.dest[: -len("/session.sh")]).get_raw_value()
+
+
+def test_config_replace_orders_deletes_before_sets() -> None:
+    """With an empty active tree, replace of a fresh path emits only sets;
+    the delete-before-set ordering is proven at the _tree tier. Here we pin
+    that the rendered script applies commands before the commit gate."""
+
+    state, _meta = prepare(
+        config,
+        path=["service", "ntp"],
+        values={"server": {"time1.test": {}}},
+        replace=True,
+    )
+    upload = operation_commands(state)[2]
+    script = upload.src.getvalue()
+
+    assert script.index("set service ntp server time1.test") < script.index("sessionChanged")
+
+
+def test_config_absent_path_with_present_false_noops() -> None:
+    _state, meta = prepare(config, path=["service", "ntp"], present=False)
+
+    assert not meta.will_change
+
+
+def test_config_bare_path_creation_sets_the_node() -> None:
+    state, meta = prepare(config, path=["service", "mdns", "repeater"])
+    upload = operation_commands(state)[2]
+
+    assert meta.will_change
+    assert "set service mdns repeater" in upload.src.getvalue()
+
+
+def test_config_rejections_surface_as_operation_value_error() -> None:
+    with pytest.raises(OperationValueError):
+        prepare(config, path=[])
+    with pytest.raises(OperationValueError):
+        prepare(config, path=["system"], values={"key": 7})
+    with pytest.raises(OperationValueError):
+        prepare(config, path=["system"], values={}, present=False)
+
+
+def test_config_save_propagates_into_the_uploaded_script() -> None:
+    def script(save: bool) -> str:
+        state, _meta = prepare(
+            config, path=["service", "ntp"], values={"server": {"t.test": {}}}, save=save
+        )
+        return operation_commands(state)[2].src.getvalue()
+
+    assert "_save_out=$(save)" in script(True)
+    assert "_save_out=$(save)" not in script(False)

@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import inspect
 import re
+import shlex
 
 import pytest
 
 from pyinfra_vyos._session import (
     SENTINEL_CHANGED,
     SENTINEL_NOOP,
+    build_commands_script,
     build_load_script,
     staging_dir,
 )
@@ -21,10 +23,17 @@ _NEEDS_SAVE = (
 )
 _BARE_EXIT_OR_DISCARD = re.compile(r"(?<!builtin )\b(exit|discard)\b")
 _STAGING_PATTERN = re.compile(r"^/tmp/pyinfra-vyos-[0-9a-f]{32}$")
+_COMMANDS = [
+    ["delete", "service", "ntp", "server", "old.test"],
+    ["set", "service", "ntp", "server", "new.test"],
+]
+_BUILDERS = ["load", "commands"]
 
 
-def _script(*, save: bool) -> str:
-    return build_load_script(_STAGING, save=save)
+def _script(*, save: bool, kind: str = "load") -> str:
+    if kind == "load":
+        return build_load_script(_STAGING, save=save)
+    return build_commands_script(_STAGING, _COMMANDS, save=save)
 
 
 def _tri_state_blocks(script: str) -> list[str]:
@@ -43,15 +52,17 @@ def _tri_state_blocks(script: str) -> list[str]:
 
 
 @pytest.mark.parametrize("save", [False, True])
-def test_pager_export_precedes_source_line(save: bool) -> None:
-    script = _script(save=save)
+@pytest.mark.parametrize("kind", _BUILDERS)
+def test_pager_export_precedes_source_line(save: bool, kind: str) -> None:
+    script = _script(save=save, kind=kind)
 
     assert script.index("export VYATTA_PAGER=cat") < script.index(_SOURCE)
 
 
 @pytest.mark.parametrize("save", [False, True])
-def test_trap_disarms_exit_inside_the_trap_body(save: bool) -> None:
-    script = _script(save=save)
+@pytest.mark.parametrize("kind", _BUILDERS)
+def test_trap_disarms_exit_inside_the_trap_body(save: bool, kind: str) -> None:
+    script = _script(save=save, kind=kind)
     body_start = script.index("_pyinfra_vyos_cleanup() {")
     body_end = script.index("\n}", body_start)
     body = script[body_start:body_end]
@@ -67,8 +78,9 @@ def test_trap_disarms_exit_inside_the_trap_body(save: bool) -> None:
 
 
 @pytest.mark.parametrize("save", [False, True])
-def test_every_termination_is_builtin_exit_never_the_aliases(save: bool) -> None:
-    script = _script(save=save)
+@pytest.mark.parametrize("kind", _BUILDERS)
+def test_every_termination_is_builtin_exit_never_the_aliases(save: bool, kind: str) -> None:
+    script = _script(save=save, kind=kind)
 
     assert "builtin exit" in script
     assert _BARE_EXIT_OR_DISCARD.search(script) is None
@@ -81,8 +93,9 @@ def test_every_termination_is_builtin_exit_never_the_aliases(save: bool) -> None
 
 
 @pytest.mark.parametrize("save", [False, True])
-def test_session_changed_tri_state_is_present_on_both_calls(save: bool) -> None:
-    script = _script(save=save)
+@pytest.mark.parametrize("kind", _BUILDERS)
+def test_session_changed_tri_state_is_present_on_both_calls(save: bool, kind: str) -> None:
+    script = _script(save=save, kind=kind)
 
     assert script.count(_SESSION_CHANGED) == 2
     blocks = _tri_state_blocks(script)
@@ -94,9 +107,10 @@ def test_session_changed_tri_state_is_present_on_both_calls(save: bool) -> None:
         assert "builtin exit 1" in block
 
 
-def test_save_block_present_iff_save_true() -> None:
-    with_save = _script(save=True)
-    without_save = _script(save=False)
+@pytest.mark.parametrize("kind", _BUILDERS)
+def test_save_block_present_iff_save_true(kind: str) -> None:
+    with_save = _script(save=True, kind=kind)
+    without_save = _script(save=False, kind=kind)
 
     assert _NEEDS_SAVE in with_save
     assert with_save.count(_NEEDS_SAVE) == 2
@@ -122,8 +136,9 @@ def test_save_block_is_reachable_on_the_noop_path() -> None:
 
 
 @pytest.mark.parametrize("save", [False, True])
-def test_sentinel_strings_equal_the_constants(save: bool) -> None:
-    script = _script(save=save)
+@pytest.mark.parametrize("kind", _BUILDERS)
+def test_sentinel_strings_equal_the_constants(save: bool, kind: str) -> None:
+    script = _script(save=save, kind=kind)
 
     assert SENTINEL_CHANGED == "PYINFRA_VYOS changed"
     assert SENTINEL_NOOP == "PYINFRA_VYOS noop"
@@ -151,3 +166,61 @@ def test_staging_dir_returns_unique_matching_paths() -> None:
 def test_staging_dir_takes_no_content_argument() -> None:
     assert inspect.signature(staging_dir).parameters == {}
     assert staging_dir.__code__.co_argcount == 0
+
+
+# --- build_commands_script ---------------------------------------------------
+
+
+def test_commands_script_rejects_empty_and_unknown_verbs() -> None:
+    with pytest.raises(ValueError, match="nonempty"):
+        build_commands_script(_STAGING, [], save=False)
+    with pytest.raises(ValueError, match="unsupported"):
+        build_commands_script(_STAGING, [["run", "reboot"]], save=False)
+    with pytest.raises(ValueError, match="unsupported"):
+        build_commands_script(_STAGING, [[]], save=False)
+
+
+def test_commands_are_rendered_in_order_between_session_entry_and_commit_gate() -> None:
+    script = _script(save=False, kind="commands")
+    in_session = script.index("if ! /bin/cli-shell-api inSession")
+    first_gate = script.index(_SESSION_CHANGED)
+    delete_at = script.index("delete service ntp server old.test")
+    set_at = script.index("set service ntp server new.test")
+
+    assert in_session < delete_at < set_at < first_gate
+
+
+def test_command_tokens_are_shell_quoted() -> None:
+    tricky = "hi there 'quoted'"
+    script = build_commands_script(
+        _STAGING,
+        [["set", "system", "login", "banner", "pre-login", tricky]],
+        save=False,
+    )
+
+    expected = " ".join(
+        ["set", *(shlex.quote(t) for t in ["system", "login", "banner", "pre-login", tricky])]
+    )
+    assert f"_cmd_out=$({expected})" in script
+    assert tricky not in script.replace(shlex.quote(tricky), "")
+
+
+def test_every_command_rc_is_checked() -> None:
+    script = _script(save=False, kind="commands")
+
+    assert script.count("_cmd_rc=$?") == len(_COMMANDS)
+    assert script.count('if [ "$_cmd_rc" -ne 0 ]; then') == len(_COMMANDS)
+
+
+def test_failure_diagnostic_never_contains_command_values() -> None:
+    secret = "s3cret-value"
+    script = build_commands_script(
+        _STAGING,
+        [["set", "system", "login", "user", "x", "authentication", "plaintext-password", secret]],
+        save=False,
+    )
+
+    failure_lines = [line for line in script.splitlines() if ">&2" in line]
+    assert failure_lines
+    assert all(secret not in line for line in failure_lines)
+    assert any("config command 1 (set) failed" in line for line in failure_lines)
