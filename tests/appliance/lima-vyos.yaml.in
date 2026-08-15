@@ -1,0 +1,36 @@
+# Lima template for the pyinfra-vyos appliance lab. Rendered by vyos-lab
+# (__IMAGE__ is substituted with the built qcow2 path); do not start this
+# file directly.
+#
+# Every non-default field is deliberate:
+# - vmType qemu + arch x86_64: free official VyOS images are amd64-only, so
+#   Apple Silicon hosts must run full-system emulation (slow; the boot takes
+#   minutes).
+# - plain: VyOS cannot run Lima's guest agent or cloud-init provisioning;
+#   plain mode disables mounts/containerd/agent expectations. SSH still works
+#   through QEMU's static hostfwd.
+# - legacyBIOS: the image is installed via the ISO's BIOS boot path.
+# - user vyos + /bin/vbash: matches the account baked in by build-image.sh
+#   (Lima's key is authorized for it).
+vmType: qemu
+arch: x86_64
+plain: true
+
+images:
+  - location: "__IMAGE__"
+    arch: x86_64
+
+cpus: 2
+memory: 4GiB
+disk: 10GiB
+
+firmware:
+  legacyBIOS: true
+
+user:
+  name: vyos
+  home: /home/vyos
+  shell: /bin/vbash
+
+ssh:
+  localPort: 60022

@@ -153,6 +153,15 @@ export PYINFRA_VYOS_TEST_HOST=vyos-lab.example.net
 uv run --locked pytest --appliance tests/integration
 ```
 
+On a Mac with [Lima](https://lima-vm.io) installed, the bundled lab brings
+up a disposable local appliance and runs the tier against it (see
+[tests/appliance/README.md](tests/appliance/README.md)):
+
+```sh
+tests/appliance/vyos-lab test
+tests/appliance/vyos-lab down
+```
+
 `root:check` runs the unit tier only. The `@local` integration tier has
 its own CI workflow.
 

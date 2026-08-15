@@ -41,17 +41,19 @@ def pytest_collection_modifyitems(
     config: pytest.Config,
     items: list[pytest.Item],
 ) -> None:
+    # Use get_closest_marker, not `in item.keywords`: keywords include parent
+    # collector names, and every test under tests/integration/ has the
+    # keyword "integration" from the directory alone — which wrongly gated
+    # appliance tests behind --integration as well.
     run_appliance = config.getoption("--appliance") and bool(
         os.environ.get("PYINFRA_VYOS_TEST_HOST", "").strip(),
     )
     skip_appliance = pytest.mark.skip(reason=_APPLIANCE_SKIP_REASON)
+    skip_integration = pytest.mark.skip(reason=_SKIP_REASON)
+    run_integration = config.getoption("--integration")
     for item in items:
-        if "appliance" in item.keywords and not run_appliance:
-            item.add_marker(skip_appliance)
-
-    if config.getoption("--integration"):
-        return
-    skip = pytest.mark.skip(reason=_SKIP_REASON)
-    for item in items:
-        if "integration" in item.keywords:
-            item.add_marker(skip)
+        if item.get_closest_marker("appliance") is not None:
+            if not run_appliance:
+                item.add_marker(skip_appliance)
+        elif item.get_closest_marker("integration") is not None and not run_integration:
+            item.add_marker(skip_integration)

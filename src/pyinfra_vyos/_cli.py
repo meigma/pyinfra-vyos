@@ -29,6 +29,7 @@ __all__ = [
 
 _SCRIPT_TEMPLATE = "/opt/vyatta/etc/functions/script-template"
 _VBASH = "/bin/vbash"
+_STRIP_PRIVATE = "/usr/libexec/vyos/strip-private.py"
 
 
 def _single_quote(value: str) -> str:
@@ -40,14 +41,15 @@ def _single_quote(value: str) -> str:
     return "'" + value.replace("'", "'\\''") + "'"
 
 
-def vyos_op_command(*argv: str, marker: str) -> StringCommand:
+def vyos_op_command(*argv: str, marker: str, strip_private: bool = False) -> StringCommand:
     """Wrap bare op-mode *argv* as a ``vbash -c`` script with a trailing marker.
 
     pyinfra executes via ``sh -c``, where VyOS op-mode commands do not exist.
-    This helper is the only place ``run`` is added: the inner script exports
-    ``VYATTA_PAGER=cat``, sources script-template, invokes ``run <argv…>``
-    once, and on success emits *marker* on its own line via ``printf``
-    chained with ``&&`` so the real command's exit status propagates.
+    This helper is the only place ``run`` is added: the inner script sets
+    ``pipefail``, exports ``VYATTA_PAGER=cat``, sources script-template,
+    invokes ``run <argv…>`` once, and on success emits *marker* on its own
+    line via ``printf`` chained with ``&&`` so the real command's exit status
+    propagates.
 
     ``source`` and ``run`` are separate lines inside the ``-c`` payload.
     ``run`` is a bash alias defined when script-template sources vyatta
@@ -55,24 +57,28 @@ def vyos_op_command(*argv: str, marker: str) -> StringCommand:
     before that source executes, so the alias never expands (rc 127). A
     newline lets bash parse line by line after the source has run.
 
-    Callers pass VyOS op-pipe tokens (``\\|``, ``strip-private``) as ordinary
-    argv; they are rendered literally. The inner script as a whole is
-    POSIX-single-quote-escaped for the outer shell.
+    ``strip_private=True`` pipes the op-mode output through the target's
+    ``/usr/libexec/vyos/strip-private.py`` filter. VyOS's interactive
+    ``… | strip-private`` op pipe is grammar handled by the interactive
+    op-mode runner only: passing ``|``/``strip-private`` as ``run`` argv is
+    rejected on a real appliance (``Invalid command: … [|]``), so redaction
+    must be a genuine shell pipeline. ``set -o pipefail`` keeps the op-mode
+    command's failure observable through the pipeline.
 
     The pager export stops ``less`` hanging when stdout is a PTY
     (``_get_pty=True``). The pager pipeline can still mask the op-mode
     return code under a PTY.
     """
 
-    inner = StringCommand(
-        "run",
-        *argv,
-        "&&",
-        "printf",
-        "'\\n%s\\n'",
-        marker,
+    bits: list[str] = ["run", *argv]
+    if strip_private:
+        bits += ["|", _STRIP_PRIVATE]
+    bits += ["&&", "printf", "'\\n%s\\n'", marker]
+    inner = StringCommand(*bits)
+    script = (
+        "set -o pipefail\n"
+        f"export VYATTA_PAGER=cat\nsource {_SCRIPT_TEMPLATE}\n{inner.get_raw_value()}"
     )
-    script = f"export VYATTA_PAGER=cat\nsource {_SCRIPT_TEMPLATE}\n{inner.get_raw_value()}"
     return StringCommand("vbash", "-c", _single_quote(script))
 
 
