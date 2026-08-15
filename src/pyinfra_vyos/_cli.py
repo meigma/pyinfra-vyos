@@ -72,9 +72,7 @@ def vyos_op_command(*argv: str, marker: str) -> StringCommand:
         "'\\n%s\\n'",
         marker,
     )
-    script = (
-        f"export VYATTA_PAGER=cat\nsource {_SCRIPT_TEMPLATE}\n{inner.get_raw_value()}"
-    )
+    script = f"export VYATTA_PAGER=cat\nsource {_SCRIPT_TEMPLATE}\n{inner.get_raw_value()}"
     return StringCommand("vbash", "-c", _single_quote(script))
 
 
