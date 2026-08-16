@@ -1,0 +1,234 @@
+"""Pure renderer seam: desired keyword models to disjoint ``Scope`` lists.
+
+Typed operations are renderers (A2, D6). This module holds the ``Scope``
+algebra, the helpers every renderer shares, and the per-op renderer
+functions themselves — :func:`render_system_basics` is the first; later
+phases add their own. There is no I/O and no pyinfra state. Callers pass
+values in and get values out.
+
+Layer contract: a renderer maps a desired keyword model plus a schema key
+to ``list[Scope]``. ``operations.py`` feeds those scopes to the shared
+planner. Every token a renderer emits — path components, keys, and leaf
+values — is validated through ``_tree`` (``normalize_tree(strict=True)`` /
+``_require_token``) so the C2 leading-dash / nonempty-string rule holds
+without a second validator in this module. Ergonomic ints (MTU, rule
+numbers) are coerced to ``str`` with :func:`coerce_token` **before** those
+token rules run.
+
+Secret-field convention (used from Phase 5): validation errors name the
+field and the accepted forms, never the value. A rejected
+``encrypted_password`` must not echo the submitted hash or plaintext into
+the exception message.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+
+from pyinfra_vyos._tree import Node, TreeError, normalize_tree, validate_path
+
+__all__ = [
+    "Absent",
+    "Exact",
+    "Merge",
+    "RenderError",
+    "Scope",
+    "coerce_token",
+    "render_system_basics",
+    "schema_key",
+]
+
+# Qualified rolling families: calendar-version prefix -> schema key.
+# Later fixture/appliance-qualified releases are one-line additions (D9).
+_QUALIFIED_ROLLING: dict[str, str] = {
+    "2026.03": "1.5",
+}
+
+_VERSION_PREFIX = "VyOS "
+
+# Stable families: ``1.4`` / ``1.4.N[.suffix]`` and the 1.5 analogue.
+# ``1.4-rolling-*`` does not match — the hyphen form is fail-closed.
+_STABLE_SCHEMA: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"1\.4(?:\.\d+.*)?"), "1.4"),
+    (re.compile(r"1\.5(?:\.\d+.*)?"), "1.5"),
+)
+
+
+class RenderError(ValueError):
+    """Rejected renderer input; translated to OperationValueError."""
+
+
+@dataclass(frozen=True)
+class Absent:
+    """Marker intent: ensure the node at ``path`` does not exist.
+
+    Parameterless frozen dataclass. Callers construct ``Absent()``; checks
+    use ``isinstance(intent, Absent)``. The class object is not the marker.
+    """
+
+
+@dataclass(frozen=True)
+class Exact:
+    """The node at ``path`` becomes exactly ``node``.
+
+    ``node`` is a normalized leaf (``list[str]``, unordered set) or a
+    subtree (``dict``, replace semantics: extra active keys/values pruned).
+    """
+
+    node: Node
+
+
+@dataclass(frozen=True)
+class Merge:
+    """Open-body merge at ``path``: sets only, omitted state unmanaged."""
+
+    subtree: dict[str, Node]
+
+
+@dataclass(frozen=True)
+class Scope:
+    """One owned config node produced by a typed-op renderer (D8).
+
+    Every ``set`` / ``delete`` planned from this scope inherits ``sensitive``.
+    """
+
+    path: list[str]
+    intent: Absent | Exact | Merge
+    sensitive: bool = False
+
+
+def coerce_token(value: str | int) -> str:
+    """Coerce an ergonomic int token to ``str`` before C2 token rules.
+
+    Bools are rejected explicitly: ``bool`` is an ``int`` subclass, but
+    ``True`` / ``False`` are not config-path tokens.
+    """
+
+    if isinstance(value, bool):
+        raise RenderError("token must be a string or int, not a bool")
+    if isinstance(value, int):
+        return str(value)
+    return value
+
+
+def schema_key(version_string: str) -> str:
+    """Map a raw ``Version`` fact ``version`` field to ``"1.4"`` or ``"1.5"``.
+
+    Input is the fact field as captured (D9, fail-closed). An optional
+    ``VyOS `` prefix is stripped (lab form ``VyOS 2026.03``; fixtures use
+    ``VyOS 1.4-rolling-…``). Stable ``1.4`` / ``1.4.N[.suffix]`` map to
+    ``"1.4"``; stable ``1.5`` / ``1.5.N[.suffix]`` map to ``"1.5"``. The
+    only qualified rolling family is ``2026.03`` with an optional ``.N``
+    patch, mapped to ``"1.5"``. Everything else — ``1.4-rolling-*``,
+    ``1.5-rolling-*``, bare train names, unqualified calendar versions,
+    empty, junk — raises :class:`RenderError` naming the version string
+    and the version-agnostic ``config`` / ``config_load`` escape hatches.
+    """
+
+    token = (
+        version_string[len(_VERSION_PREFIX) :]
+        if version_string.startswith(_VERSION_PREFIX)
+        else version_string
+    )
+    for pattern, schema in _STABLE_SCHEMA:
+        if pattern.fullmatch(token):
+            return schema
+    for family, schema in _QUALIFIED_ROLLING.items():
+        if not token.startswith(family):
+            continue
+        rest = token[len(family) :]
+        if not rest or (rest.startswith(".") and rest[1:].isdigit()):
+            return schema
+    raise RenderError(
+        f"unrecognized VyOS version {version_string!r}; typed operations "
+        f"require a known 1.4 or 1.5 schema. Use the version-agnostic "
+        f"config / config_load operations as an escape hatch"
+    )
+
+
+# D9 seam: 1.4 and 1.5 emit the same R§2 modern-baseline system identity
+# leaves. Tables are keyed by schema anyway so a later fork does not break
+# this signature.
+_SYSTEM_BASICS_LEAVES: dict[str, list[str]] = {
+    "hostname": ["system", "host-name"],
+    "domain_name": ["system", "domain-name"],
+    "name_servers": ["system", "name-server"],
+    "search_domains": ["system", "domain-search"],
+    "time_zone": ["system", "time-zone"],
+}
+_SYSTEM_BASICS_PATHS: dict[str, dict[str, list[str]]] = {
+    "1.4": _SYSTEM_BASICS_LEAVES,
+    "1.5": _SYSTEM_BASICS_LEAVES,
+}
+
+_SYSTEM_BASICS_SCALARS = frozenset({"hostname", "domain_name", "time_zone"})
+_SYSTEM_BASICS_LISTS = frozenset({"name_servers", "search_domains"})
+
+
+def _validated_path(path: list[str]) -> list[str]:
+    try:
+        return validate_path(path)
+    except TreeError as error:
+        raise RenderError(str(error)) from error
+
+
+def _validated_leaf(value: str | list[str], *, field: str, where: str = "argument") -> Node:
+    try:
+        normalized = normalize_tree({field: value}, strict=True, _where=where)
+    except TreeError as error:
+        raise RenderError(str(error)) from error
+    return normalized[field]
+
+
+def render_system_basics(
+    schema: str,
+    *,
+    hostname: str | None = None,
+    domain_name: str | None = None,
+    name_servers: list[str] | None = None,
+    search_domains: list[str] | None = None,
+    time_zone: str | None = None,
+) -> list[Scope]:
+    """Render per-field ``system`` identity leaves as disjoint ``Scope`` values.
+
+    ``None`` is unmanaged and omitted. A provided scalar becomes
+    ``Exact([value])``. A provided list becomes ``Exact(list)``; ``[]`` is
+    own-and-empty (``Absent`` at the leaf). All-``None`` is an error.
+    """
+
+    fields: dict[str, str | list[str] | None] = {
+        "hostname": hostname,
+        "domain_name": domain_name,
+        "name_servers": name_servers,
+        "search_domains": search_domains,
+        "time_zone": time_zone,
+    }
+    if all(value is None for value in fields.values()):
+        raise RenderError(
+            "system_basics requires at least one of hostname, domain_name, "
+            "name_servers, search_domains, time_zone"
+        )
+
+    try:
+        table = _SYSTEM_BASICS_PATHS[schema]
+    except KeyError as error:
+        raise RenderError(f"unknown schema {schema!r}") from error
+
+    scopes: list[Scope] = []
+    for field, value in fields.items():
+        if value is None:
+            continue
+        path = _validated_path(table[field])
+        if field in _SYSTEM_BASICS_LISTS:
+            if not isinstance(value, list):
+                raise RenderError(f"{field} must be a list of strings")
+            if value == []:
+                scopes.append(Scope(path=path, intent=Absent()))
+                continue
+        elif field in _SYSTEM_BASICS_SCALARS:
+            if not isinstance(value, str):
+                raise RenderError(f"{field} must be a string")
+        node = _validated_leaf(value, field=field, where=field)
+        scopes.append(Scope(path=path, intent=Exact(node=node)))
+    return scopes

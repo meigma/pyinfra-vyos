@@ -14,8 +14,18 @@ from pyinfra.context import ctx_state
 
 import pyinfra_vyos
 from pyinfra_vyos._cli import sg_probe, sg_vbash_run
-from pyinfra_vyos._session import SENTINEL_CHANGED
-from pyinfra_vyos.operations import _guarded, _SourceError, config, config_load, config_save
+from pyinfra_vyos._render import Absent, Exact, Merge, Scope
+from pyinfra_vyos._session import SENTINEL_CHANGED, PlannedCommand
+from pyinfra_vyos.facts import Configuration
+from pyinfra_vyos.operations import (
+    _guarded,
+    _plan_scopes,
+    _SourceError,
+    config,
+    config_load,
+    config_save,
+    system_basics,
+)
 
 _VALID_CONFIG = "set system host-name pyinfra-vyos\n"
 _WHITESPACE_ONLY = "  \n\t\n  "
@@ -132,9 +142,38 @@ def test_package_exports_the_public_primitives() -> None:
         "config",
         "config_load",
         "config_save",
+        "system_basics",
     ]
     for exported in pyinfra_vyos.__all__:
         assert getattr(pyinfra_vyos, exported) is not None
+
+
+def test_system_basics_signature_is_keyword_only() -> None:
+    parameters = inspect.signature(system_basics).parameters
+
+    assert list(parameters) == [
+        "hostname",
+        "domain_name",
+        "name_servers",
+        "search_domains",
+        "time_zone",
+        "save",
+    ]
+    for parameter in parameters.values():
+        assert parameter.kind is parameter.KEYWORD_ONLY
+    assert parameters["hostname"].default is None
+    assert parameters["domain_name"].default is None
+    assert parameters["name_servers"].default is None
+    assert parameters["search_domains"].default is None
+    assert parameters["time_zone"].default is None
+    assert parameters["save"].default is False
+
+
+def test_system_basics_all_none_rejects_before_any_host_access() -> None:
+    """Validation raises OperationValueError before host.get_fact is reached."""
+
+    with pytest.raises(OperationValueError):
+        list(system_basics._inner())
 
 
 def test_nonexistent_path_is_rejected(tmp_path: Path) -> None:
@@ -280,3 +319,184 @@ def test_save_flag_propagates_into_uploaded_script() -> None:
     assert SENTINEL_CHANGED in without_save
     assert "_save_out=$(save)" not in without_save
     assert "did_save=1" not in without_save
+
+
+# --- _plan_scopes ------------------------------------------------------------
+#
+# `_plan_scopes` is unit-tested against a stub host: @local cannot reach
+# planner branches without a `vbash` Configuration fact (the plan allows a
+# stub only for that gap).
+
+
+_PLAN_TREE: dict[str, Any] = {
+    "system": {
+        "host-name": "r1",
+        "time-zone": "UTC",
+        "name-server": ["192.0.2.1"],
+    },
+    "service": {
+        "ntp": {"server": {"time1.example.net": {}}},
+    },
+    "interfaces": {
+        "dummy": {"dum0": {"address": ["192.0.2.1/32"]}},
+    },
+}
+
+
+class _ConfigurationHost:
+    """Minimal host exposing `get_fact` for `_plan_scopes` unit tests."""
+
+    def __init__(self, tree: dict[str, Any]) -> None:
+        self.tree = tree
+        self.fact_calls = 0
+
+    def get_fact(self, fact: object, *args: object, **kwargs: object) -> dict[str, Any]:
+        self.fact_calls += 1
+        assert fact is Configuration
+        return self.tree
+
+
+def test_plan_scopes_covers_absent_exact_and_merge() -> None:
+    host = _ConfigurationHost(_PLAN_TREE)
+
+    planned = _plan_scopes(
+        host,
+        [
+            Scope(["service", "ntp"], Absent()),
+            Scope(["system", "host-name"], Exact(["router"])),
+            Scope(["interfaces", "dummy", "dum0"], Merge({"description": ["lab"]})),
+        ],
+    )
+
+    assert planned == [
+        PlannedCommand(["delete", "service", "ntp"]),
+        PlannedCommand(["delete", "system", "host-name", "r1"]),
+        PlannedCommand(["set", "system", "host-name", "router"]),
+        PlannedCommand(["set", "interfaces", "dummy", "dum0", "description", "lab"]),
+    ]
+
+
+def test_plan_scopes_preserves_scope_order_when_delete_follows_set() -> None:
+    host = _ConfigurationHost(_PLAN_TREE)
+
+    planned = _plan_scopes(
+        host,
+        [
+            Scope(["system", "host-name"], Exact(["router"])),
+            Scope(["service", "ntp"], Absent()),
+        ],
+    )
+
+    assert planned is not None
+    # A global deletes-then-sets flatten would hoist the Absent delete
+    # ahead of Exact's set. Scope order must keep it after.
+    assert [command.argv[0] for command in planned] == ["delete", "set", "delete"]
+    assert planned[-1] == PlannedCommand(["delete", "service", "ntp"])
+
+
+def test_plan_scopes_emits_deletes_before_sets_within_one_exact_scope() -> None:
+    host = _ConfigurationHost(_PLAN_TREE)
+
+    planned = _plan_scopes(
+        host,
+        [Scope(["system", "host-name"], Exact(["router"]))],
+    )
+
+    assert planned == [
+        PlannedCommand(["delete", "system", "host-name", "r1"]),
+        PlannedCommand(["set", "system", "host-name", "router"]),
+    ]
+
+
+def test_plan_scopes_inherits_sensitivity_onto_every_command() -> None:
+    host = _ConfigurationHost(_PLAN_TREE)
+
+    planned = _plan_scopes(
+        host,
+        [Scope(["system", "host-name"], Exact(["router"]), sensitive=True)],
+    )
+
+    assert planned == [
+        PlannedCommand(["delete", "system", "host-name", "r1"], sensitive=True),
+        PlannedCommand(["set", "system", "host-name", "router"], sensitive=True),
+    ]
+
+
+def test_plan_scopes_mixed_scopes_keep_per_scope_sensitivity() -> None:
+    host = _ConfigurationHost(_PLAN_TREE)
+
+    planned = _plan_scopes(
+        host,
+        [
+            Scope(["system", "host-name"], Exact(["router"]), sensitive=True),
+            Scope(["service", "ntp"], Absent()),
+            Scope(
+                ["interfaces", "dummy", "dum0"],
+                Merge({"description": ["lab"]}),
+                sensitive=True,
+            ),
+        ],
+    )
+
+    assert planned == [
+        PlannedCommand(["delete", "system", "host-name", "r1"], sensitive=True),
+        PlannedCommand(["set", "system", "host-name", "router"], sensitive=True),
+        PlannedCommand(["delete", "service", "ntp"]),
+        PlannedCommand(
+            ["set", "interfaces", "dummy", "dum0", "description", "lab"],
+            sensitive=True,
+        ),
+    ]
+
+
+def test_plan_scopes_empty_delta_returns_none() -> None:
+    host = _ConfigurationHost(_PLAN_TREE)
+
+    assert (
+        _plan_scopes(
+            host,
+            [
+                Scope(["system", "host-name"], Exact(["r1"])),
+                Scope(["protocols", "static"], Absent()),
+            ],
+        )
+        is None
+    )
+
+
+def test_plan_scopes_merge_empty_on_existing_node_plans_nothing() -> None:
+    host = _ConfigurationHost(_PLAN_TREE)
+
+    assert _plan_scopes(host, [Scope(["system"], Merge({}))]) is None
+
+
+def test_plan_scopes_merge_empty_on_absent_node_sets_presence() -> None:
+    host = _ConfigurationHost(_PLAN_TREE)
+
+    planned = _plan_scopes(host, [Scope(["protocols", "static"], Merge({}))])
+
+    assert planned == [PlannedCommand(["set", "protocols", "static"])]
+
+
+def test_plan_scopes_exact_empty_desired_on_leaf_never_bare_deletes() -> None:
+    host = _ConfigurationHost(_PLAN_TREE)
+
+    planned = _plan_scopes(host, [Scope(["system", "host-name"], Exact({}))])
+
+    assert planned is None
+
+
+def test_plan_scopes_fetches_configuration_once() -> None:
+    host = _ConfigurationHost(_PLAN_TREE)
+
+    _plan_scopes(
+        host,
+        [
+            Scope(["service", "ntp"], Absent()),
+            Scope(["system", "host-name"], Exact(["router"])),
+            Scope(["interfaces", "dummy", "dum0"], Merge({"description": ["lab"]})),
+            Scope(["protocols"], Merge({})),
+        ],
+    )
+
+    assert host.fact_calls == 1

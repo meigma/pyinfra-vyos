@@ -12,7 +12,10 @@ Layer map:
   :class:`Version`, :class:`Configuration`, :class:`ConfigurationCommands`,
   :class:`PendingSave`.
 - ``operations.py`` — public ``@operation`` functions only:
-  :func:`config_load`, :func:`config`, :func:`config_save`.
+  :func:`config`, :func:`config_load`, :func:`config_save`,
+  :func:`system_basics`.
+- ``_render.py`` — the pure domain for typed-op rendering: ``Scope``
+  algebra, schema-key mapping, and per-op renderer functions.
 - ``_session.py`` — the pure domain for the session half: script text,
   sentinels, and the high-entropy staging path. No I/O and no pyinfra state.
 - ``_parse.py`` — the pure domain for the parse half: ``show version`` /
@@ -31,7 +34,7 @@ import them directly::
 """
 
 from pyinfra_vyos.facts import Configuration, ConfigurationCommands, PendingSave, Version
-from pyinfra_vyos.operations import config, config_load, config_save
+from pyinfra_vyos.operations import config, config_load, config_save, system_basics
 
 __all__ = [
     "Configuration",
@@ -41,4 +44,5 @@ __all__ = [
     "config",
     "config_load",
     "config_save",
+    "system_basics",
 ]

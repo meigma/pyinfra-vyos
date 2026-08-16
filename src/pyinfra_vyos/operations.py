@@ -27,6 +27,14 @@ from pyinfra.api.exceptions import OperationValueError
 
 from pyinfra_vyos._cli import session_run_sequence, sg_probe, sg_vbash_run
 from pyinfra_vyos._parse import stream_is_nonempty
+from pyinfra_vyos._render import (
+    Absent,
+    Exact,
+    RenderError,
+    Scope,
+    render_system_basics,
+    schema_key,
+)
 from pyinfra_vyos._session import (
     PlannedCommand,
     build_commands_script,
@@ -35,9 +43,9 @@ from pyinfra_vyos._session import (
     staging_dir,
 )
 from pyinfra_vyos._tree import TreeError, diff_tree, normalize_tree, select_subtree, validate_path
-from pyinfra_vyos.facts import Configuration, PendingSave
+from pyinfra_vyos.facts import Configuration, PendingSave, Version
 
-__all__ = ["config", "config_load", "config_save"]
+__all__ = ["config", "config_load", "config_save", "system_basics"]
 
 _T = TypeVar("_T")
 
@@ -46,7 +54,7 @@ class _SourceError(Exception):
     """Rejected ``config_load`` src; translated to OperationValueError."""
 
 
-_DOMAIN_ERRORS = (_SourceError, TreeError)
+_DOMAIN_ERRORS = (_SourceError, TreeError, RenderError)
 
 
 def _guarded(function: Callable[..., _T], *args: Any, **kwargs: Any) -> _T:
@@ -106,6 +114,45 @@ def _validate_src(src: str | IO[Any]) -> str | IO[Any]:
         raise _SourceError("src file-like object must be seekable")
     _require_nonempty(src, src=repr(src))
     return src
+
+
+def _plan_scopes(host: Any, scopes: list[Scope]) -> list[PlannedCommand] | None:
+    """Plan ``set`` / ``delete`` commands for a list of renderer scopes.
+
+    Fetches :class:`~pyinfra_vyos.facts.Configuration` once. Each scope
+    emits its deletes before its sets; scope order is preserved across the
+    list. Every :class:`~pyinfra_vyos._session.PlannedCommand` inherits its
+    scope's ``sensitive`` flag. Returns ``None`` when the concatenated
+    delta is empty.
+    """
+
+    tree = host.get_fact(Configuration)
+    planned: list[PlannedCommand] = []
+    for scope in scopes:
+        intent = scope.intent
+        if isinstance(intent, Absent):
+            if select_subtree(tree, scope.path) is not None:
+                planned.append(PlannedCommand(["delete", *scope.path], sensitive=scope.sensitive))
+            continue
+        if isinstance(intent, Exact):
+            deletes, sets = diff_tree(
+                select_subtree(tree, scope.path),
+                intent.node,
+                scope.path,
+                replace=True,
+            )
+        else:
+            deletes, sets = diff_tree(
+                select_subtree(tree, scope.path),
+                intent.subtree,
+                scope.path,
+                replace=False,
+            )
+        planned.extend(
+            PlannedCommand(["delete", *argv], sensitive=scope.sensitive) for argv in deletes
+        )
+        planned.extend(PlannedCommand(["set", *argv], sensitive=scope.sensitive) for argv in sets)
+    return planned or None
 
 
 @operation(
@@ -306,3 +353,69 @@ def config_save() -> Generator[StringCommand | FileUploadCommand, None, None]:
         return
     staging = staging_dir()
     yield from session_run_sequence(staging, build_save_script(staging))
+
+
+@operation()
+def system_basics(
+    *,
+    hostname: str | None = None,
+    domain_name: str | None = None,
+    name_servers: list[str] | None = None,
+    search_domains: list[str] | None = None,
+    time_zone: str | None = None,
+    save: bool = False,
+) -> Generator[StringCommand | FileUploadCommand, None, None]:
+    """Configure system identity leaves (hostname, DNS, timezone).
+
+    Each keyword is independently owned. ``None`` (the default) leaves that
+    leaf unmanaged. An empty list on ``name_servers`` or ``search_domains``
+    owns the leaf and ensures it is empty. Scalar-field removal is out of
+    model — use :func:`config` with ``path=["system", "host-name"]`` (or
+    ``domain-name`` / ``time-zone``) and ``present=False``. Multi-value
+    leaves compare as unordered sets; value ordering is not managed.
+
+    **Concurrency precondition**: the caller MUST serialize all mutation
+    sessions per host — at most one mutation session may run at a time,
+    including runs from the same controller (§2 / D4). Overlapping
+    mutation runs are out of contract.
+
+    **Save**: ``save=True`` persists only when this run commits (D13). An
+    empty controller delta noops regardless of ``save``. Save is
+    device-global; typed ownership does not scope persistence. The
+    verify-then-persist workflow is ``system_basics(..., save=False)``
+    then :func:`config_save`.
+
+    **Device validation**: ``domain-name`` and ``domain-search`` may
+    interact on the device (VyOS may reject some combinations). That
+    constraint is not modelled here; commit output is the diagnostic.
+
+    **Version gate**: the target's :class:`~pyinfra_vyos.facts.Version`
+    must map to a known 1.4 or 1.5 schema (D9). An unrecognized,
+    unqualified, or missing version fails closed with
+    :class:`~pyinfra.api.exceptions.OperationValueError`; use the
+    version-agnostic :func:`config` / :func:`config_load` on such hosts.
+    """
+
+    if all(
+        value is None for value in (hostname, domain_name, name_servers, search_domains, time_zone)
+    ):
+        # Schema-independent: all-None is an error. Must run before Version.
+        _guarded(render_system_basics, "1.4")
+
+    version_map = host.get_fact(Version) or {}
+    schema = _guarded(schema_key, version_map.get("version", ""))
+    scopes = _guarded(
+        render_system_basics,
+        schema,
+        hostname=hostname,
+        domain_name=domain_name,
+        name_servers=name_servers,
+        search_domains=search_domains,
+        time_zone=time_zone,
+    )
+    commands = _plan_scopes(host, scopes)
+    if commands is None:
+        host.noop("system basics already match")
+        return
+    staging = staging_dir()
+    yield from session_run_sequence(staging, build_commands_script(staging, commands, save=save))
