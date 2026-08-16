@@ -19,6 +19,7 @@ from pyinfra_vyos import (
     config,
     config_load,
     config_save,
+    interface,
     system_basics,
 )
 from pyinfra_vyos._cli import vyos_op_command
@@ -34,6 +35,12 @@ _VERSION_FOOTER = "// vyos-config-version"
 _TEST_INET = "192.0.2.1"
 _SEARCH_DOMAINS = ("pyinfra-a.test", "pyinfra-b.test")
 _Q3_DOMAIN_NAME = "pyinfra-q3.test"
+_DUMMY_IFACE = "dum0"
+_DUMMY_TYPE = "dummy"
+_DUMMY_ADDRESS = "192.0.2.65/32"
+_DUMMY_ADDRESSES_REPLACED = ("192.0.2.66/32", "192.0.2.67/32")
+_DUMMY_DESCRIPTION = "pyinfra phase3"
+_DUMMY_MTU = 1400
 _SYSTEM_OPEN_LINE = re.compile(r"(?m)^system\s*\{\n")
 _DEFAULT_CAPTURE_DIR = Path(__file__).resolve().parent / "_captures"
 
@@ -155,13 +162,35 @@ def _leaf_scalar(node: Any) -> str | None:
     return values[0]
 
 
+def _op_mode_tree(inventory: Inventory) -> dict[str, Any]:
+    """Independent T2 read: parse ``show configuration json``."""
+
+    return parse_config_json(_op_mode_text(inventory, "show", "configuration", "json"))
+
+
 def _op_mode_system(inventory: Inventory) -> dict[str, Any]:
     """Independent T2 read: parse ``show configuration json`` and return ``system``."""
 
-    tree = parse_config_json(_op_mode_text(inventory, "show", "configuration", "json"))
-    system = tree.get("system")
+    system = _op_mode_tree(inventory).get("system")
     assert isinstance(system, dict), f"unexpected system node: {system!r}"
     return system
+
+
+def _op_mode_dummy(inventory: Inventory, name: str = _DUMMY_IFACE) -> dict[str, Any] | None:
+    """Independent T2 read of ``interfaces dummy <name>``, or ``None`` if absent."""
+
+    interfaces = _op_mode_tree(inventory).get("interfaces")
+    if not isinstance(interfaces, dict):
+        return None
+    dummy = _instance_child(interfaces, "dummy")
+    if dummy is None:
+        return None
+    node = _instance_child(dummy, name)
+    if node is None:
+        return None
+    if isinstance(node, dict):
+        return node
+    raise AssertionError(f"unexpected dummy {name} node: {node!r}")
 
 
 def test_version_returns_a_version_key(inventory: Inventory) -> None:
@@ -517,3 +546,146 @@ def test_system_basics_cycle_and_q3_domain_probe(inventory: Inventory) -> None:
                 search_domains=original_search_domains,
                 save=False,
             )
+
+
+def test_interface_dummy_full_cycle(inventory: Inventory) -> None:
+    """interface dummy cycle (plan 3.3).
+
+    ``dum0`` only — no cable, no management-path lockout. ethernet / eth0 is
+    never touched. First apply sets address, description, and mtu; independent
+    ``show configuration json`` verifies those leaves under ``interfaces dummy
+    dum0``. Address CIDR form is a canonicalization hotspot: the device is
+    asserted to echo ``192.0.2.65/32`` verbatim (``address`` list
+    ``["192.0.2.65/32"]``). Observed address / description / mtu node shapes
+    are written to ``phase3-interface-canon.txt``.
+
+    A second identical apply is a controller-side noop (T3). Replacing the
+    address set with two new TEST-NET-2 /32s proves Exact prunes the old
+    address. ``disabled=True`` / ``disabled=False`` with every other field
+    unmanaged proves per-field independence of the ``disable`` node.
+    ``present=False`` removes the interface; a second delete is a noop.
+
+    ``save=False`` throughout: commits touch only the active config, so boot
+    is untouched. Cleanup always deletes ``dum0`` (already-absent is a noop).
+    """
+
+    try:
+        first = apply(
+            interface,
+            inventory=inventory,
+            interface=_DUMMY_IFACE,
+            interface_type=_DUMMY_TYPE,
+            addresses=[_DUMMY_ADDRESS],
+            description=_DUMMY_DESCRIPTION,
+            mtu=_DUMMY_MTU,
+            save=False,
+        )
+        assert first.did_change()
+        _assert_sentinel(first, SENTINEL_CHANGED)
+
+        node = _op_mode_dummy(inventory)
+        assert node is not None, "dummy dum0 missing after create"
+        observed_addresses = _leaf_values(node.get("address"))
+        assert observed_addresses == [_DUMMY_ADDRESS]
+        assert _leaf_scalar(node.get("description")) == _DUMMY_DESCRIPTION
+        assert _leaf_scalar(node.get("mtu")) == str(_DUMMY_MTU)
+
+        artifact = _capture_dir() / "phase3-interface-canon.txt"
+        artifact.write_text(
+            "pyinfra-vyos phase3 interface canonicalization hotspot "
+            f"(dummy {_DUMMY_IFACE}):\n"
+            f"address node: {node.get('address')!r}\n"
+            f"address list: {observed_addresses!r}\n"
+            f"description node: {node.get('description')!r}\n"
+            f"mtu node: {node.get('mtu')!r}\n"
+        )
+        print(f"pyinfra-vyos phase3 interface canon: {artifact}")
+
+        second = apply(
+            interface,
+            inventory=inventory,
+            interface=_DUMMY_IFACE,
+            interface_type=_DUMMY_TYPE,
+            addresses=[_DUMMY_ADDRESS],
+            description=_DUMMY_DESCRIPTION,
+            mtu=_DUMMY_MTU,
+            save=False,
+        )
+        assert not second.did_change()
+
+        replaced = apply(
+            interface,
+            inventory=inventory,
+            interface=_DUMMY_IFACE,
+            interface_type=_DUMMY_TYPE,
+            addresses=list(_DUMMY_ADDRESSES_REPLACED),
+            save=False,
+        )
+        assert replaced.did_change()
+        _assert_sentinel(replaced, SENTINEL_CHANGED)
+        replaced_node = _op_mode_dummy(inventory)
+        assert replaced_node is not None
+        replaced_addresses = _leaf_values(replaced_node.get("address"))
+        assert replaced_addresses is not None
+        assert set(replaced_addresses) == set(_DUMMY_ADDRESSES_REPLACED)
+        assert _DUMMY_ADDRESS not in replaced_addresses
+
+        disabled = apply(
+            interface,
+            inventory=inventory,
+            interface=_DUMMY_IFACE,
+            interface_type=_DUMMY_TYPE,
+            disabled=True,
+            save=False,
+        )
+        assert disabled.did_change()
+        _assert_sentinel(disabled, SENTINEL_CHANGED)
+        disabled_node = _op_mode_dummy(inventory)
+        assert disabled_node is not None
+        assert "disable" in disabled_node
+
+        enabled = apply(
+            interface,
+            inventory=inventory,
+            interface=_DUMMY_IFACE,
+            interface_type=_DUMMY_TYPE,
+            disabled=False,
+            save=False,
+        )
+        assert enabled.did_change()
+        _assert_sentinel(enabled, SENTINEL_CHANGED)
+        enabled_node = _op_mode_dummy(inventory)
+        assert enabled_node is not None
+        assert "disable" not in enabled_node
+
+        deleted = apply(
+            interface,
+            inventory=inventory,
+            interface=_DUMMY_IFACE,
+            interface_type=_DUMMY_TYPE,
+            present=False,
+            save=False,
+        )
+        assert deleted.did_change()
+        _assert_sentinel(deleted, SENTINEL_CHANGED)
+        assert _op_mode_dummy(inventory) is None
+
+        deleted_again = apply(
+            interface,
+            inventory=inventory,
+            interface=_DUMMY_IFACE,
+            interface_type=_DUMMY_TYPE,
+            present=False,
+            save=False,
+        )
+        assert not deleted_again.did_change()
+        assert _op_mode_dummy(inventory) is None
+    finally:
+        apply(
+            interface,
+            inventory=inventory,
+            interface=_DUMMY_IFACE,
+            interface_type=_DUMMY_TYPE,
+            present=False,
+            save=False,
+        )

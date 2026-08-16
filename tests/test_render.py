@@ -12,7 +12,9 @@ from pyinfra_vyos._render import (
     RenderError,
     Scope,
     coerce_token,
+    render_interface,
     render_system_basics,
+    require_absent_args_unset,
     schema_key,
 )
 
@@ -159,6 +161,29 @@ def test_coerce_token_int_and_str() -> None:
 def test_coerce_token_rejects_bool(value: bool) -> None:
     with pytest.raises(RenderError):
         coerce_token(value)
+
+
+# --- require_absent_args_unset -----------------------------------------------
+
+
+def test_require_absent_args_unset_raises_naming_the_arg() -> None:
+    with pytest.raises(RenderError) as caught:
+        require_absent_args_unset(False, addresses=["192.0.2.1/32"], description=None)
+
+    message = str(caught.value)
+    assert "addresses" in message
+    assert "present=False" in message
+
+
+def test_require_absent_args_unset_passes_when_all_none() -> None:
+    require_absent_args_unset(
+        False,
+        addresses=None,
+        description=None,
+        mtu=None,
+        disabled=None,
+        values=None,
+    )
 
 
 # --- assert_disjoint ---------------------------------------------------------
@@ -375,3 +400,180 @@ def test_render_system_basics_all_none_raises(schema: str) -> None:
 def test_render_system_basics_rejects_invalid_values(kwargs: dict[str, object]) -> None:
     with pytest.raises(RenderError):
         render_system_basics("1.4", **kwargs)  # type: ignore[arg-type]
+
+
+# --- render_interface --------------------------------------------------------
+
+
+_R2_INTERFACE_TYPES = ("ethernet", "loopback", "dummy")
+
+
+def _interface_path(interface_type: str, name: str = "eth0") -> list[str]:
+    return ["interfaces", interface_type, name]
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+@pytest.mark.parametrize(
+    ("kwargs", "suffix", "intent"),
+    [
+        ({"addresses": ["192.0.2.1/24"]}, ["address"], Exact(["192.0.2.1/24"])),
+        ({"description": "uplink"}, ["description"], Exact(["uplink"])),
+        ({"mtu": "1500"}, ["mtu"], Exact(["1500"])),
+        ({"mtu": 1500}, ["mtu"], Exact(["1500"])),
+        ({"disabled": True}, ["disable"], Exact({})),
+        ({"disabled": False}, ["disable"], Absent()),
+        (
+            {"values": {"hw-id": "aa:bb:cc:dd:ee:ff"}},
+            [],
+            Merge({"hw-id": ["aa:bb:cc:dd:ee:ff"]}),
+        ),
+    ],
+)
+def test_render_interface_emits_scope_per_kwarg(
+    schema: str, kwargs: dict[str, object], suffix: list[str], intent: Exact | Absent | Merge
+) -> None:
+    scopes = render_interface(schema, "eth0", "ethernet", **kwargs)  # type: ignore[arg-type]
+    assert_disjoint(scopes)
+    assert len(scopes) == 1
+    assert scopes[0].path == [*_interface_path("ethernet"), *suffix]
+    assert scopes[0].intent == intent
+    assert scopes[0].sensitive is False
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+def test_render_interface_empty_addresses_is_absent_at_leaf(schema: str) -> None:
+    scopes = render_interface(schema, "eth0", "ethernet", addresses=[])
+    assert_disjoint(scopes)
+    assert len(scopes) == 1
+    assert scopes[0].path == [*_interface_path("ethernet"), "address"]
+    assert isinstance(scopes[0].intent, Absent)
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+def test_render_interface_disabled_none_omits_disable_scope(schema: str) -> None:
+    scopes = render_interface(schema, "eth0", "ethernet", addresses=["192.0.2.1/24"], disabled=None)
+    assert_disjoint(scopes)
+    assert [scope.path for scope in scopes] == [[*_interface_path("ethernet"), "address"]]
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_render_interface_rejects_bool_mtu(value: bool) -> None:
+    with pytest.raises(RenderError):
+        render_interface("1.4", "eth0", "ethernet", mtu=value)
+
+
+@pytest.mark.parametrize(
+    ("key", "typed"),
+    [
+        ("address", "addresses"),
+        ("description", "description"),
+        ("mtu", "mtu"),
+        ("disable", "disabled"),
+    ],
+)
+def test_render_interface_rejects_typed_key_collision(key: str, typed: str) -> None:
+    with pytest.raises(RenderError) as caught:
+        render_interface("1.4", "eth0", "ethernet", values={key: ["x"]})
+
+    message = str(caught.value)
+    assert key in message
+    assert typed in message
+
+
+def test_render_interface_nested_values_keys_are_not_collisions() -> None:
+    scopes = render_interface(
+        "1.4",
+        "eth0",
+        "ethernet",
+        values={"vif": {"10": {"address": ["192.0.2.1/24"]}}},
+    )
+    assert_disjoint(scopes)
+    assert len(scopes) == 1
+    assert scopes[0].path == _interface_path("ethernet")
+    assert isinstance(scopes[0].intent, Merge)
+    assert "vif" in scopes[0].intent.subtree
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+@pytest.mark.parametrize("disabled", [True, False])
+def test_render_interface_full_kwarg_matrix_is_disjoint(schema: str, disabled: bool) -> None:
+    scopes = render_interface(
+        schema,
+        "eth0",
+        "ethernet",
+        addresses=["192.0.2.1/24"],
+        description="uplink",
+        mtu=1500,
+        disabled=disabled,
+        values={"hw-id": "aa:bb:cc:dd:ee:ff"},
+    )
+    assert_disjoint(scopes)
+    disable_intent: Exact | Absent = Exact({}) if disabled else Absent()
+    assert [scope.path for scope in scopes] == [
+        [*_interface_path("ethernet"), "address"],
+        [*_interface_path("ethernet"), "description"],
+        [*_interface_path("ethernet"), "mtu"],
+        [*_interface_path("ethernet"), "disable"],
+        _interface_path("ethernet"),
+    ]
+    assert [scope.intent for scope in scopes] == [
+        Exact(["192.0.2.1/24"]),
+        Exact(["uplink"]),
+        Exact(["1500"]),
+        disable_intent,
+        Merge({"hw-id": ["aa:bb:cc:dd:ee:ff"]}),
+    ]
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"addresses": ["192.0.2.1/24"]},
+        {"description": "uplink"},
+        {"mtu": 1500},
+        {"disabled": True},
+        {"disabled": False},
+        {"values": {"hw-id": "aa:bb:cc:dd:ee:ff"}},
+    ],
+)
+def test_render_interface_present_false_rejects_desired_args(kwargs: dict[str, object]) -> None:
+    with pytest.raises(RenderError) as caught:
+        render_interface("1.4", "eth0", "ethernet", present=False, **kwargs)  # type: ignore[arg-type]
+
+    name = next(iter(kwargs))
+    assert name in str(caught.value)
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+def test_render_interface_present_false_alone_is_absent(schema: str) -> None:
+    scopes = render_interface(schema, "eth0", "ethernet", present=False)
+    assert_disjoint(scopes)
+    assert scopes == [Scope(_interface_path("ethernet"), Absent())]
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+def test_render_interface_unknown_type_names_allowed_types(schema: str) -> None:
+    with pytest.raises(RenderError) as caught:
+        render_interface(schema, "eth0", "bridge")
+
+    message = str(caught.value)
+    assert "bridge" in message
+    for allowed in _R2_INTERFACE_TYPES:
+        assert allowed in message
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+@pytest.mark.parametrize("interface_type", _R2_INTERFACE_TYPES)
+def test_render_interface_emits_r2_path_tokens(schema: str, interface_type: str) -> None:
+    scopes = render_interface(schema, "eth0", interface_type)
+    assert_disjoint(scopes)
+    assert len(scopes) == 1
+    assert scopes[0].path == ["interfaces", interface_type, "eth0"]
+    assert scopes[0].intent == Merge({})
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+def test_render_interface_all_none_is_bare_merge(schema: str) -> None:
+    scopes = render_interface(schema, "eth0", "ethernet")
+    assert_disjoint(scopes)
+    assert scopes == [Scope(_interface_path("ethernet"), Merge({}))]

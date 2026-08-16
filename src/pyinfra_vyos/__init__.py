@@ -13,7 +13,7 @@ Layer map:
   :class:`PendingSave`.
 - ``operations.py`` — public ``@operation`` functions only:
   :func:`config`, :func:`config_load`, :func:`config_save`,
-  :func:`system_basics`.
+  :func:`interface`, :func:`system_basics`.
 - ``_render.py`` — the pure domain for typed-op rendering: ``Scope``
   algebra, schema-key mapping, and per-op renderer functions.
 - ``_session.py`` — the pure domain for the session half: script text,
@@ -34,7 +34,7 @@ import them directly::
 """
 
 from pyinfra_vyos.facts import Configuration, ConfigurationCommands, PendingSave, Version
-from pyinfra_vyos.operations import config, config_load, config_save, system_basics
+from pyinfra_vyos.operations import config, config_load, config_save, interface, system_basics
 
 __all__ = [
     "Configuration",
@@ -44,5 +44,6 @@ __all__ = [
     "config",
     "config_load",
     "config_save",
+    "interface",
     "system_basics",
 ]

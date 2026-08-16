@@ -32,7 +32,9 @@ from pyinfra_vyos._render import (
     Exact,
     RenderError,
     Scope,
+    render_interface,
     render_system_basics,
+    require_absent_args_unset,
     schema_key,
 )
 from pyinfra_vyos._session import (
@@ -45,7 +47,7 @@ from pyinfra_vyos._session import (
 from pyinfra_vyos._tree import TreeError, diff_tree, normalize_tree, select_subtree, validate_path
 from pyinfra_vyos.facts import Configuration, PendingSave, Version
 
-__all__ = ["config", "config_load", "config_save", "system_basics"]
+__all__ = ["config", "config_load", "config_save", "interface", "system_basics"]
 
 _T = TypeVar("_T")
 
@@ -416,6 +418,98 @@ def system_basics(
     commands = _plan_scopes(host, scopes)
     if commands is None:
         host.noop("system basics already match")
+        return
+    staging = staging_dir()
+    yield from session_run_sequence(staging, build_commands_script(staging, commands, save=save))
+
+
+@operation()
+def interface(
+    interface: str,
+    *,
+    interface_type: str,
+    addresses: list[str] | None = None,
+    description: str | None = None,
+    mtu: int | str | None = None,
+    disabled: bool | None = None,
+    values: dict[str, Any] | None = None,
+    present: bool = True,
+    save: bool = False,
+) -> Generator[StringCommand | FileUploadCommand, None, None]:
+    """Configure one VyOS interface (ethernet, loopback, or dummy).
+
+    Each keyword is independently owned. ``None`` (the default) leaves that
+    field unmanaged. ``addresses`` is an exact set when provided; ``[]``
+    owns the address leaf and empties it. ``disabled`` is tri-state:
+    ``True`` ensures the ``disable`` node, ``False`` removes it, ``None``
+    leaves it unmanaged. ``values`` is an open-body merge at the interface
+    path; keys that collide with a typed field (``address``,
+    ``description``, ``mtu``, ``disable``) are rejected. All typed fields
+    ``None`` and no ``values`` still ensure the bare interface node exists
+    (``Merge({})``). ``present=False`` deletes the interface; every desired
+    argument must then be left unset.
+
+    Device-owned leaves such as ``hw-id`` survive because this operation
+    never whole-subtree-replaces the interface node.
+
+    **``interface_type`` is explicit by design — name-prefix inference was
+    rejected for wave 2 as magic; revisit only with user-friction
+    evidence; ethernet grammar is fixture-asserted but NOT
+    hardware-verified in wave 2 (appliance uses dummy only).** Allowed
+    types are ``ethernet``, ``loopback``, and ``dummy``.
+
+    **Lockout**: management-interface address changes and ``disabled=True``
+    take effect at commit. Commit is immediate; ``save=False`` limits reboot
+    persistence only — it is not a dry run and does not protect against
+    lockout. The verify-then-persist workflow is ``interface(..., save=False)``
+    then :func:`config_save`. Out-of-band recovery (console / OOB access) is
+    assumed if a change severs the controller session.
+
+    **Concurrency precondition**: the caller MUST serialize all mutation
+    sessions per host — at most one mutation session may run at a time,
+    including runs from the same controller (§2 / D4). Overlapping
+    mutation runs are out of contract.
+
+    **Save**: ``save=True`` persists only when this run commits (D13). An
+    empty controller delta noops regardless of ``save``. Save is
+    device-global; typed ownership does not scope persistence.
+
+    **Version gate**: the target's :class:`~pyinfra_vyos.facts.Version`
+    must map to a known 1.4 or 1.5 schema (D9). An unrecognized,
+    unqualified, or missing version fails closed with
+    :class:`~pyinfra.api.exceptions.OperationValueError`; use the
+    version-agnostic :func:`config` / :func:`config_load` on such hosts.
+    """
+
+    if not present:
+        # Schema-independent: present=False forbids desired args. Must run before Version.
+        _guarded(
+            require_absent_args_unset,
+            present,
+            addresses=addresses,
+            description=description,
+            mtu=mtu,
+            disabled=disabled,
+            values=values,
+        )
+
+    version_map = host.get_fact(Version) or {}
+    schema = _guarded(schema_key, version_map.get("version", ""))
+    scopes = _guarded(
+        render_interface,
+        schema,
+        interface,
+        interface_type,
+        addresses=addresses,
+        description=description,
+        mtu=mtu,
+        disabled=disabled,
+        values=values,
+        present=present,
+    )
+    commands = _plan_scopes(host, scopes)
+    if commands is None:
+        host.noop(f"interface {interface_type} {interface} already matches")
         return
     staging = staging_dir()
     yield from session_run_sequence(staging, build_commands_script(staging, commands, save=save))
