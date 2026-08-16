@@ -122,3 +122,31 @@ Orchestrated 2 waves of programmer agents + 1 tight review pass in
   language stays conservative.
 - Appliance tier 7/7 including migrated-config behavior preservation on
   hardware.
+
+## 2026-08-15 17:35 — Phase 2 implemented; PR #10 open for review
+Same orchestration pattern in `feat/system-basics`; PR #10 open, CI green.
+- Wave A: _render.py (Scope algebra, RenderError, schema_key, coerce_token)
+  + @local vbash shim fixture. Captured the real Version literal from the
+  live lab first (`VyOS 2026.03` — no patch component; plan's sketch assumed
+  2026.03.x) per the phase's named risk.
+- Wave B: _plan_scopes, system_basics (+@local tests), appliance scenario.
+  Two incidents: (a) concurrent operations.py edits clobbered _plan_scopes
+  and its tests; agents had also split work across repo root and worktree —
+  consolidated the superset into the worktree, restored root to pristine;
+  (b) restoration agent recovered the planner verbatim from the dead
+  agent's transcript.
+- Review (approve-with-fixes) P1: schema_key was fail-OPEN — qualified-
+  rolling match not anchored to token start; 2027.01.1/9999.99.1/abcdefg.5
+  silently mapped to 1.5. Fixed + pinned. Plus @local noop coverage and
+  P3 cleanups (error labels no longer say `values`, assert_disjoint skips
+  unrelated scopes).
+- HARDWARE LESSON (recorded in appliance suite): committing blackholed
+  TEST-NET `system name-server` entries deterministically breaks SSH auth
+  for subsequent sessions (2x reproduced, fresh VM each; reboot recovers,
+  boot config untouched). Appliance tier must never mutate the management-
+  path resolver; name-server semantics stay unit/@local. Scenario reworked
+  around time_zone + search_domains.
+- Q3 resolved by observation: domain-name + domain-search together ACCEPTED
+  on VyOS 2026.03 (q3-domain-interaction.txt). Canonicalization hotspots
+  clean: domain-search set order preserved, time-zone form verbatim.
+- Appliance tier 8/8.
