@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 from pyinfra.api import Inventory, StringCommand
-from pyinfra.api.exceptions import PyinfraError
+from pyinfra.api.exceptions import OperationValueError, PyinfraError
 from pyinfra.api.operation import OperationMeta
 
 from pyinfra_vyos import (
@@ -19,9 +19,10 @@ from pyinfra_vyos import (
     config,
     config_load,
     config_save,
+    system_basics,
 )
 from pyinfra_vyos._cli import vyos_op_command
-from pyinfra_vyos._parse import OUTPUT_MARKER, strip_marker
+from pyinfra_vyos._parse import OUTPUT_MARKER, parse_config_json, strip_marker
 from pyinfra_vyos._session import SENTINEL_CHANGED, SENTINEL_NOOP
 
 from ._helpers import appliance_inventory, apply, fact_value, new_state
@@ -31,6 +32,8 @@ pytestmark = pytest.mark.appliance
 _BOOT_PATH = "/config/config.boot"
 _VERSION_FOOTER = "// vyos-config-version"
 _TEST_INET = "192.0.2.1"
+_SEARCH_DOMAINS = ("pyinfra-a.test", "pyinfra-b.test")
+_Q3_DOMAIN_NAME = "pyinfra-q3.test"
 _SYSTEM_OPEN_LINE = re.compile(r"(?m)^system\s*\{\n")
 _DEFAULT_CAPTURE_DIR = Path(__file__).resolve().parent / "_captures"
 
@@ -127,6 +130,38 @@ def _capture_dir() -> Path:
     path = Path(override).expanduser() if override else _DEFAULT_CAPTURE_DIR
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def _leaf_values(node: Any) -> list[str] | None:
+    """Return a config leaf as ``list[str]``, or ``None`` when the node is absent."""
+
+    if node is None:
+        return None
+    if isinstance(node, list):
+        return [str(item) for item in node]
+    if isinstance(node, str):
+        return [node]
+    raise AssertionError(f"unexpected leaf node shape: {node!r}")
+
+
+def _leaf_scalar(node: Any) -> str | None:
+    """Return a single-value leaf, or ``None`` when the node is absent."""
+
+    values = _leaf_values(node)
+    if values is None:
+        return None
+    if len(values) != 1:
+        raise AssertionError(f"expected a single leaf value, got {values!r}")
+    return values[0]
+
+
+def _op_mode_system(inventory: Inventory) -> dict[str, Any]:
+    """Independent T2 read: parse ``show configuration json`` and return ``system``."""
+
+    tree = parse_config_json(_op_mode_text(inventory, "show", "configuration", "json"))
+    system = tree.get("system")
+    assert isinstance(system, dict), f"unexpected system node: {system!r}"
+    return system
 
 
 def test_version_returns_a_version_key(inventory: Inventory) -> None:
@@ -331,3 +366,154 @@ def test_rejected_commit_partial_application_is_a_lab_observation(
         print(f"pyinfra-vyos Q2 lab-release data point: {artifact}")
     finally:
         apply(config, inventory=inventory, path=path, present=False)
+
+
+def test_system_basics_cycle_and_q3_domain_probe(inventory: Inventory) -> None:
+    """system_basics identity cycle (plan 2.6) plus the §12 Q3 probe.
+
+    Hostname is applied as its current value so per-field Exact noops on an
+    equal scalar while time-zone and domain-search change. Independent
+    op-mode JSON (``show configuration json``) verifies the desired time-zone
+    and the two ``.test`` search domains (set-equality; observed
+    ``domain-search`` ordering is a canonicalization hotspot, as is time-zone
+    string form). A second identical apply is a controller-side noop (T3).
+    Shrinking ``search_domains`` to ``pyinfra-a.test`` proves Exact prunes
+    ``pyinfra-b.test``.
+
+    Global ``system name-server`` mutation is excluded from the appliance
+    tier because committing blackholed TEST-NET resolvers caused
+    deterministic SSH auth timeouts for subsequent sessions on the lab
+    release (recovered by reboot; boot config untouched). Name-server
+    Exact-list semantics remain covered by unit and @local tiers.
+
+    Q3 (``domain-name`` and ``domain-search`` together) is answered by
+    observation, never encoded as controller validation: VyOS may reject
+    that coexistence, and that is the Q3 answer. An accepted commit or a
+    commit-rejected pyinfra error is written to
+    ``q3-domain-interaction.txt`` under the capture dir. The test does not
+    fail on either outcome. ``save=False`` throughout: commits touch only
+    the active config, so boot is untouched.
+    """
+
+    tree = fact_value(Configuration, inventory=inventory)
+    system = tree.get("system")
+    assert isinstance(system, dict)
+
+    original_hostname = _leaf_scalar(system.get("host-name"))
+    original_time_zone = _leaf_scalar(system.get("time-zone"))
+    original_search_domains = _leaf_values(system.get("domain-search"))
+    assert original_hostname, "system host-name must be present so Exact can noop on the scalar"
+
+    time_zone = "US/Pacific" if original_time_zone in (None, "UTC") else "UTC"
+    search_domains = list(_SEARCH_DOMAINS)
+
+    try:
+        first = apply(
+            system_basics,
+            inventory=inventory,
+            hostname=original_hostname,
+            time_zone=time_zone,
+            search_domains=search_domains,
+            save=False,
+        )
+        assert first.did_change()
+        _assert_sentinel(first, SENTINEL_CHANGED)
+
+        observed_system = _op_mode_system(inventory)
+        observed_search = _leaf_values(observed_system.get("domain-search"))
+        assert observed_search is not None
+        assert set(observed_search) == set(search_domains)
+        observed_time_zone = _leaf_scalar(observed_system.get("time-zone"))
+        assert observed_time_zone == time_zone
+        assert _leaf_scalar(observed_system.get("host-name")) == original_hostname
+
+        second = apply(
+            system_basics,
+            inventory=inventory,
+            hostname=original_hostname,
+            time_zone=time_zone,
+            search_domains=search_domains,
+            save=False,
+        )
+        assert not second.did_change()
+
+        pruned = apply(
+            system_basics,
+            inventory=inventory,
+            search_domains=[search_domains[0]],
+            save=False,
+        )
+        assert pruned.did_change()
+        _assert_sentinel(pruned, SENTINEL_CHANGED)
+        pruned_search = _leaf_values(_op_mode_system(inventory).get("domain-search"))
+        assert pruned_search is not None
+        assert set(pruned_search) == {search_domains[0]}
+        assert search_domains[1] not in pruned_search
+
+        try:
+            q3 = apply(
+                system_basics,
+                inventory=inventory,
+                domain_name=_Q3_DOMAIN_NAME,
+                search_domains=[search_domains[0]],
+                save=False,
+            )
+        except OperationValueError as error:
+            raise AssertionError(
+                f"Q3 must not be encoded as controller validation; got OperationValueError: {error}"
+            ) from error
+        except PyinfraError as error:
+            q3_verdict = "commit-rejected"
+            q3_detail = f"{type(error).__name__}: {error}"
+        else:
+            q3_verdict = "accepted commit"
+            q3_detail = f"did_change={q3.did_change()}"
+            if q3.did_change():
+                _assert_sentinel(q3, SENTINEL_CHANGED)
+
+        artifact = _capture_dir() / "q3-domain-interaction.txt"
+        artifact.write_text(
+            f"pyinfra-vyos Q3 lab-release data point: {q3_verdict} ({q3_detail})\n"
+            "domain-search device order (canonicalization hotspot): "
+            f"{observed_search!r}\n"
+            "time-zone device form (canonicalization hotspot): "
+            f"{observed_time_zone!r}\n"
+        )
+        print(f"pyinfra-vyos Q3 lab-release data point: {artifact}")
+    finally:
+        apply(
+            config,
+            inventory=inventory,
+            path=["system", "domain-search"],
+            present=False,
+            save=False,
+        )
+        apply(
+            config,
+            inventory=inventory,
+            path=["system", "domain-name"],
+            present=False,
+            save=False,
+        )
+        if original_time_zone is None:
+            apply(
+                config,
+                inventory=inventory,
+                path=["system", "time-zone"],
+                present=False,
+                save=False,
+            )
+        else:
+            apply(
+                system_basics,
+                inventory=inventory,
+                time_zone=original_time_zone,
+                save=False,
+            )
+        if original_search_domains:
+            apply(
+                system_basics,
+                inventory=inventory,
+                search_domains=original_search_domains,
+                save=False,
+            )

@@ -15,6 +15,7 @@ from pyinfra_vyos import (
     config,
     config_load,
     config_save,
+    system_basics,
 )
 from pyinfra_vyos._cli import sg_probe, sg_vbash_run
 from pyinfra_vyos._session import SENTINEL_CHANGED
@@ -114,6 +115,13 @@ def test_facts_on_local_return_default_when_vbash_is_absent() -> None:
     assert fact_value(Version) == Version.default()
     assert fact_value(Configuration) == Configuration.default()
     assert fact_value(ConfigurationCommands) == ConfigurationCommands.default()
+
+
+def test_facts_on_local_parse_shimmed_vbash_output(vbash_shim: Path) -> None:
+    """``fact_value`` builds its own State; PATH still reaches the @local subprocess."""
+
+    assert fact_value(Version)["version"] == "VyOS 2026.03"
+    assert fact_value(Configuration) == {}
 
 
 def test_two_prepare_evaluations_produce_different_staging_tokens(sample_config: str) -> None:
@@ -232,3 +240,62 @@ def test_config_save_fails_closed_when_pending_save_is_unknown() -> None:
 
     with pytest.raises(OperationValueError, match="saved-state could not be established"):
         prepare(config_save)
+
+
+def test_system_basics_prepare_renders_the_five_command_sequence(vbash_shim: Path) -> None:
+    """Fixture Configuration is {}; every provided field plans as a set."""
+
+    state, meta = prepare(
+        system_basics,
+        hostname="gw",
+        domain_name="example.net",
+        name_servers=["8.8.8.8"],
+        search_domains=["example.net"],
+        time_zone="UTC",
+    )
+    commands = operation_commands(state)
+
+    assert meta.will_change
+    assert len(commands) == 5
+    probe, mkdir, upload, chmod, run = commands
+    assert isinstance(probe, StringCommand)
+    assert probe.get_raw_value() == sg_probe().get_raw_value()
+    assert mkdir.get_raw_value().startswith("mkdir -m 700 ")
+    assert isinstance(upload, FileUploadCommand)
+    assert upload.dest.endswith("/session.sh")
+    assert isinstance(upload.src, StringIO)
+    script = upload.src.getvalue()
+    assert "set system host-name gw" in script
+    assert "set system domain-name example.net" in script
+    assert "set system name-server 8.8.8.8" in script
+    assert "set system domain-search example.net" in script
+    assert "set system time-zone UTC" in script
+    assert "delete" not in script.replace("_cmd", "")
+    assert chmod.get_raw_value().startswith("chmod 600 ")
+    rendered = run.get_raw_value()
+    assert rendered == sg_vbash_run(upload.dest, upload.dest[: -len("/session.sh")]).get_raw_value()
+    assert vbash_shim.is_file()
+
+
+def test_system_basics_all_none_raises_operation_value_error() -> None:
+    with pytest.raises(OperationValueError):
+        prepare(system_basics)
+
+
+def test_system_basics_without_vbash_fails_closed_on_unknown_version() -> None:
+    """@local has no vbash, so Version is default/empty and the gate fails closed."""
+
+    with pytest.raises(OperationValueError) as caught:
+        prepare(system_basics, hostname="gw")
+
+    message = str(caught.value)
+    assert "config" in message
+    assert "config_load" in message
+
+
+def test_system_basics_noops_when_the_delta_is_empty(vbash_shim: Path) -> None:
+    """Fixture Configuration is {}; own-and-empty list leaves plan nothing."""
+
+    _state, meta = prepare(system_basics, name_servers=[], search_domains=[])
+
+    assert not meta.will_change
