@@ -528,15 +528,21 @@ def static_route(
 ) -> Generator[StringCommand | FileUploadCommand, None, None]:
     """Configure one VyOS static route (IPv4 or IPv6).
 
-    Address family is taken from ``destination``: IPv4 owns
-    ``protocols static route <destination>``; IPv6 owns
-    ``protocols static route6 <destination>``. The caller string is the path
-    token; the device is the canonicalization authority.
+    Address family is taken from ``destination``, which must carry an
+    explicit prefix length: IPv4 owns ``protocols static route <destination>``;
+    IPv6 owns ``protocols static route6 <destination>``. A prefix with host
+    bits set, and a bare host address with no prefix length, are both
+    planning errors. The caller string is the path token; the device is the
+    canonicalization authority.
 
-    **TOTAL-body pruning**: this operation owns the whole route object.
-    Undeclared active next-hops are REMOVED. An omitted next-hop is
-    desired-absent, never unmanaged. :func:`config` with merge semantics is
-    the alternative for shared ownership of a route.
+    **TOTAL-body pruning**: this operation owns the whole route object at
+    every depth. Undeclared active next-hops are REMOVED, and so are
+    undeclared per-hop attributes: the list form of ``next_hops`` renders
+    each address as an empty node, so re-declaring a hop as a bare address
+    deletes a ``distance`` that an earlier dict-form call set on it. An
+    omitted next-hop or attribute is desired-absent, never unmanaged.
+    :func:`config` with merge semantics is the alternative for shared
+    ownership of a route.
 
     ``next_hops`` is a list of next-hop addresses (each becomes an empty
     next-hop node) or a dict of address → per-hop subtree (distance and

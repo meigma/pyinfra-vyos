@@ -613,8 +613,23 @@ def test_parse_route_destination_accepts_networks() -> None:
 
     assert parse_route_destination("192.0.2.0/24") == ipaddress.ip_network("192.0.2.0/24")
     assert parse_route_destination("2001:db8::/64") == ipaddress.ip_network("2001:db8::/64")
-    # Bare host is /32; original caller string stays the path token in the renderer.
-    assert parse_route_destination("192.0.2.5") == ipaddress.ip_network("192.0.2.5/32")
+    assert parse_route_destination("192.0.2.5/32") == ipaddress.ip_network("192.0.2.5/32")
+    # Expanded/uppercase v6 still has a prefix and all-zero host bits; the
+    # original caller string stays the path token in the renderer.
+    assert parse_route_destination(
+        "2001:0DB8:0000:0001:0000:0000:0000:0000/64"
+    ) == ipaddress.ip_network("2001:db8:0:1::/64")
+
+
+def test_parse_route_destination_rejects_a_missing_prefix_length() -> None:
+    # The caller string is the device path token, so a prefix-less form could
+    # never round-trip against the active tree. Reject it, naming the form.
+    for destination, network in (("192.0.2.5", "192.0.2.5/32"), ("2001:db8::1", "2001:db8::1/128")):
+        with pytest.raises(RenderError) as caught:
+            parse_route_destination(destination)
+        message = str(caught.value)
+        assert destination in message
+        assert network in message
 
 
 def test_parse_route_destination_rejects_host_bits_and_garbage() -> None:
@@ -645,14 +660,23 @@ def test_render_static_route_garbage_destination_rejected() -> None:
     assert "garbage" in str(caught.value)
 
 
-def test_render_static_route_bare_host_is_slash_32() -> None:
-    # ipaddress.ip_network("192.0.2.5") treats a bare host as /32. The path
-    # token is still the original caller string; the device canonicalizes.
-    scopes = render_static_route("1.4", "192.0.2.5", next_hops=["192.0.2.1"])
+def test_render_static_route_bare_host_rejected() -> None:
+    # A prefix-less token cannot round-trip: present=False would plan nothing
+    # and noop while the route is still active. Reject at planning instead.
+    with pytest.raises(RenderError) as caught:
+        render_static_route("1.4", "192.0.2.5", next_hops=["192.0.2.1"])
+
+    message = str(caught.value)
+    assert "192.0.2.5" in message
+    assert "192.0.2.5/32" in message
+
+
+def test_render_static_route_explicit_host_prefix_accepted() -> None:
+    scopes = render_static_route("1.4", "192.0.2.5/32", next_hops=["192.0.2.1"])
     assert_disjoint(scopes)
     assert len(scopes) == 1
-    assert scopes[0].path == _static_route_path("192.0.2.5")
-    assert isinstance(scopes[0].intent, Exact)
+    assert scopes[0].path == _static_route_path("192.0.2.5/32")
+    assert scopes[0].intent == Exact({"next-hop": {"192.0.2.1": {}}})
 
 
 def test_render_static_route_list_and_dict_next_hops_are_equivalent() -> None:

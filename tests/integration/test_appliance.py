@@ -47,8 +47,8 @@ _DUMMY_MTU = 1400
 _ROUTE_V4 = "192.0.2.0/24"
 _ROUTE_V4_HOPS = ("203.0.113.1", "203.0.113.2")
 _ROUTE_V4_DISTANCE = "50"
-_ROUTE_V6 = "2001:db8:0:1::/64"
-_ROUTE_V6_HOP = "2001:db8::1"
+_ROUTE_V6 = "2001:0DB8:0000:0001:0000:0000:0000:0000/64"
+_ROUTE_V6_HOP = "2001:0DB8:0000:0000:0000:0000:0000:0001"
 _LOOPBACK_IFACE = "lo"
 _SYSTEM_OPEN_LINE = re.compile(r"(?m)^system\s*\{\n")
 _DEFAULT_CAPTURE_DIR = Path(__file__).resolve().parent / "_captures"
@@ -808,8 +808,10 @@ def test_static_route_full_cycle(inventory: Inventory) -> None:
 
     Documentation prefixes only — ``192.0.2.0/24`` (TEST-NET-1) via TEST-NET-3
     next-hops ``203.0.113.1`` / ``203.0.113.2``, plus one ``2001:db8::/32``
-    documentation v6 probe. Next-hops are unreachable; that is fine, no real
-    traffic is sent, and default / management-path routes are never touched.
+    documentation v6 probe submitted in expanded, uppercase form so the
+    device's compression is observable rather than trivially equal.
+    Next-hops are unreachable; that is fine, no real traffic is sent, and
+    default / management-path routes are never touched.
 
     First apply creates two next-hops; independent ``show configuration json``
     verifies both addresses under ``protocols static route 192.0.2.0/24``. A
@@ -817,10 +819,11 @@ def test_static_route_full_cycle(inventory: Inventory) -> None:
     proves whole-object Exact prunes the undeclared hop. Dict-form
     ``next_hops`` then sets ``distance 50`` on the remaining hop.
 
-    The v6 probe records the device's echoed destination and next-hop
-    compression to ``phase4-route-canon.txt``. A second identical v6 apply is
-    recorded as noop-or-re-emit (canonicalization mismatch) without failing
-    either way; wrong state still fails.
+    The v6 probe submits an expanded, uppercase destination and next-hop and
+    records the device's echoed (compressed) forms to
+    ``phase4-route-canon.txt``. A second identical v6 apply is recorded as
+    noop-or-re-emit (canonicalization mismatch) without failing either way;
+    wrong state still fails.
 
     ``present=False`` removes both routes; a second delete of each is a noop.
     ``save=False`` throughout: commits touch only the active config, so boot

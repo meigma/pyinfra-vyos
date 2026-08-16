@@ -377,6 +377,11 @@ def parse_route_destination(
 ) -> ipaddress.IPv4Network | ipaddress.IPv6Network:
     """Parse *destination* as a network; host bits and garbage are errors.
 
+    An explicit prefix length is required: a bare host address is rejected
+    with the ``/32`` (or ``/128``) form named, because the caller string is
+    used verbatim as the device path token and a prefix-less token cannot
+    round-trip against the active tree.
+
     Schema-independent: callers may hoist this before the Version fact (A1).
     ``render_static_route`` still owns authoritative AF dispatch.
     """
@@ -386,18 +391,20 @@ def parse_route_destination(
     if not isinstance(destination, str):
         raise RenderError("destination must be a string")
     try:
-        return ipaddress.ip_network(destination, strict=True)
+        network = ipaddress.ip_network(destination, strict=True)
     except ValueError as error:
         try:
-            network = ipaddress.ip_network(destination, strict=False)
+            relaxed = ipaddress.ip_network(destination, strict=False)
         except ValueError:
             raise RenderError(f"invalid destination {destination!r}") from error
         raise RenderError(
-            f"destination {destination!r} has host bits set; use the network form {network!s}"
+            f"destination {destination!r} has host bits set; use the network form {relaxed!s}"
         ) from error
-
-
-_static_route_network = parse_route_destination
+    if "/" not in destination:
+        raise RenderError(
+            f"destination {destination!r} has no prefix length; use the network form {network!s}"
+        )
+    return network
 
 
 def _next_hops_wrapper(next_hops: object) -> dict[str, object]:
@@ -426,9 +433,10 @@ def render_static_route(
     """Render one ``protocols static route[6] <dest>`` node as a single ``Scope``.
 
     Address-family dispatch uses ``ipaddress.ip_network(destination)`` with
-    ``strict=True``: a prefix with host bits set is rejected so the caller
-    states intent exactly. The original caller string is the path token;
-    the device is the canonicalization authority.
+    ``strict=True``: a prefix with host bits set is rejected, and so is a
+    destination with no prefix length at all, so the caller states intent
+    exactly. The original caller string is the path token; the device is
+    the canonicalization authority.
 
     ``next_hops`` as ``list[str]`` becomes ``{"next-hop": {addr: {}}}``;
     as ``dict[str, dict]`` the per-hop subtrees are preserved. Addresses
