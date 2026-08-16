@@ -171,3 +171,23 @@ Same pattern in `feat/interface`; PR #11 open, CI green.
   fixture-asserted only — NOT hardware-verified (management path never
   touched); recorded per plan risk table.
 - Q4 recorded in the op docstring: interface_type explicit by design.
+
+## 2026-08-15 21:20 — Phase 4 implemented; PR #12 open for review
+Same pattern in `feat/static-route`; PR #12 open, CI green. Green-state
+commits after each gate (process change from phase 3) — no restore drama.
+- Single 3-agent wave, disjoint files, no incidents. Op agent hoisted the
+  destination parse pre-Version by importing the renderer-owned helper
+  (phase-3 lesson institutionalized).
+- Review (approve-with-fixes, 5 findings): P2 bare-host destination passed
+  strict ip_network as implicit /32 then never round-trips (device stores
+  /32, select_subtree misses, present=False falsely noops) — now rejected;
+  P2 total-body prune had appliance-only evidence — host-free planner test
+  added; P2 v6 canonicalization probe submitted already-canonical tokens
+  (structurally unfalsifiable) — now submits expanded/uppercase.
+- Appliance 10/10. v6 HARDWARE LESSON (inverse of the expected risk): the
+  device does NOT canonicalize route tag-node keys — expanded/uppercase
+  IPv6 stored VERBATIM, second apply noops. Hazard is two textual forms
+  creating two distinct route nodes; documented in the op docstring
+  (standardize on compressed lowercase). Plan's risk table had assumed
+  compression; observation recorded in phase4-route-canon.txt.
+- Total-body prune observed on hardware (2 hops -> 1).
