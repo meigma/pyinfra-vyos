@@ -3,8 +3,9 @@
 Typed operations are renderers (A2, D6). This module holds the ``Scope``
 algebra, the helpers every renderer shares, and the per-op renderer
 functions themselves — :func:`render_system_basics`,
-:func:`render_interface`, :func:`render_static_route`, and
-:func:`render_user` so far; later phases add their own. There is no I/O
+:func:`render_interface`, :func:`render_static_route`,
+:func:`render_user`, and :func:`render_firewall_group` so far; later
+phases add their own. There is no I/O
 and no pyinfra state. Callers pass values in and get values out.
 
 Layer contract: a renderer maps a desired keyword model plus a schema key
@@ -38,11 +39,13 @@ __all__ = [
     "Scope",
     "coerce_token",
     "parse_route_destination",
+    "render_firewall_group",
     "render_interface",
     "render_static_route",
     "render_system_basics",
     "render_user",
     "require_absent_args_unset",
+    "require_firewall_group_members",
     "schema_key",
 ]
 
@@ -244,6 +247,18 @@ def require_absent_args_unset(present: bool, **desired: object) -> None:
     for name, value in desired.items():
         if value is not None:
             raise RenderError(f"{name} must be omitted when present=False")
+
+
+def require_firewall_group_members(present: bool, members: object) -> None:
+    """Reject ``present=True`` when ``members`` is ``None`` (ARCHITECTURE §4).
+
+    ``[]`` is allowed (own-and-empty). Schema-independent: callers may hoist
+    this before the Version fact. :func:`render_firewall_group` still owns
+    the authoritative check.
+    """
+
+    if present and members is None:
+        raise RenderError("firewall_group requires members when present=True")
 
 
 def render_system_basics(
@@ -607,3 +622,87 @@ def render_user(
             )
         )
     return scopes
+
+
+# D9 seam: 1.4 and 1.5 emit the same R§2 modern-baseline static firewall
+# groups. Tables are keyed by schema anyway so a later fork does not break
+# this signature.
+#
+# Member-leaf names from VyOS 1.5 firewall groups:
+# https://docs.vyos.io/en/1.5/configuration/firewall/groups.html (2026-08-16)
+_FIREWALL_GROUP_MEMBER_LEAVES: dict[str, tuple[str, str]] = {
+    "address": ("address-group", "address"),
+    "ipv6-address": ("ipv6-address-group", "address"),
+    "network": ("network-group", "network"),
+    "ipv6-network": ("ipv6-network-group", "network"),
+    "port": ("port-group", "port"),
+    "interface": ("interface-group", "interface"),
+    "mac": ("mac-group", "mac-address"),
+    "domain": ("domain-group", "address"),
+}
+_FIREWALL_GROUP_TYPES: dict[str, dict[str, tuple[str, str]]] = {
+    "1.4": _FIREWALL_GROUP_MEMBER_LEAVES,
+    "1.5": _FIREWALL_GROUP_MEMBER_LEAVES,
+}
+
+
+def render_firewall_group(
+    schema: str,
+    group: str,
+    group_type: str,
+    *,
+    members: list[str | int] | None = None,
+    description: str | None = None,
+    present: bool = True,
+) -> list[Scope]:
+    """Render one ``firewall group <type>-group <name>`` node as a single ``Scope``.
+
+    Whole-object / TOTAL body: undeclared members and an omitted
+    ``description`` are desired-absent. ``members=[]`` omits the member
+    leaf entirely so active members prune. ``members=[]`` and
+    ``description=None`` yields ``Exact({})``: on an absent node this
+    plans the bare presence set, which IS commit-valid for firewall group
+    nodes (unlike route tag nodes; cf. phase-5 ``ssh_keys={}`` which
+    Absents a child, not the resource root). ``present=True`` requires
+    ``members`` (``None`` is an error; ``[]`` is own-and-empty).
+    ``present=False`` is a single ``Absent`` at the group path; every
+    desired-state argument must be unset.
+    """
+
+    require_absent_args_unset(present, members=members, description=description)
+    require_firewall_group_members(present, members)
+
+    try:
+        table = _FIREWALL_GROUP_TYPES[schema]
+    except KeyError as error:
+        raise RenderError(f"unknown schema {schema!r}") from error
+    try:
+        path_segment, member_leaf = table[group_type]
+    except KeyError as error:
+        allowed = ", ".join(sorted(table))
+        raise RenderError(f"unknown group_type {group_type!r}; allowed types: {allowed}") from error
+
+    if not isinstance(group, str):
+        raise RenderError("group must be a string")
+    _validated_leaf(group, field="group", where="group")
+    path = _validated_path(["firewall", "group", path_segment, group])
+
+    if not present:
+        return [Scope(path=path, intent=Absent())]
+
+    if not isinstance(members, list):
+        raise RenderError("members must be a list of strings or ints")
+    body: dict[str, Node] = {}
+    if members:
+        coerced: list[str] = []
+        for item in members:
+            try:
+                coerced.append(coerce_token(item))
+            except RenderError:
+                raise RenderError("members must be a list of strings or ints") from None
+        body[member_leaf] = _validated_leaf(coerced, field="members", where="members")
+    if description is not None:
+        if not isinstance(description, str):
+            raise RenderError("description must be a string")
+        body["description"] = _validated_leaf(description, field="description", where="description")
+    return [Scope(path=path, intent=Exact(node=body))]

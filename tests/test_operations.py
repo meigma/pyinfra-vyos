@@ -14,7 +14,15 @@ from pyinfra.context import ctx_state
 
 import pyinfra_vyos
 from pyinfra_vyos._cli import sg_probe, sg_vbash_run
-from pyinfra_vyos._render import Absent, Exact, Merge, Scope, render_static_route, render_user
+from pyinfra_vyos._render import (
+    Absent,
+    Exact,
+    Merge,
+    Scope,
+    render_firewall_group,
+    render_static_route,
+    render_user,
+)
 from pyinfra_vyos._session import SENTINEL_CHANGED, PlannedCommand
 from pyinfra_vyos.facts import Configuration
 from pyinfra_vyos.operations import (
@@ -25,6 +33,7 @@ from pyinfra_vyos.operations import (
     config,
     config_load,
     config_save,
+    firewall_group,
     interface,
     static_route,
     system_basics,
@@ -146,6 +155,7 @@ def test_package_exports_the_public_primitives() -> None:
         "config",
         "config_load",
         "config_save",
+        "firewall_group",
         "interface",
         "static_route",
         "system_basics",
@@ -315,6 +325,51 @@ def test_user_present_false_rejects_desired_args_before_any_host_access() -> Non
 
     with pytest.raises(OperationValueError, match="full_name"):
         list(user._inner("alice", present=False, full_name="Alice"))
+
+
+def test_firewall_group_signature_is_positional_group_and_type_then_keyword_only() -> None:
+    parameters = inspect.signature(firewall_group).parameters
+
+    assert list(parameters) == [
+        "group",
+        "group_type",
+        "members",
+        "description",
+        "present",
+        "save",
+    ]
+    assert parameters["group"].kind is parameters["group"].POSITIONAL_OR_KEYWORD
+    assert parameters["group_type"].kind is parameters["group_type"].POSITIONAL_OR_KEYWORD
+    for name in ("members", "description", "present", "save"):
+        assert parameters[name].kind is parameters[name].KEYWORD_ONLY
+    assert parameters["group"].default is inspect.Parameter.empty
+    assert parameters["group_type"].default is inspect.Parameter.empty
+    assert parameters["members"].default is None
+    assert parameters["description"].default is None
+    assert parameters["present"].default is True
+    assert parameters["save"].default is False
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"group": "pyfw", "group_type": "address", "present": False, "members": ["192.0.2.10"]},
+        {"group": "pyfw", "group_type": "address"},
+    ],
+)
+def test_firewall_group_schema_independent_rejections_surface_before_any_host_access(
+    kwargs: dict[str, Any],
+) -> None:
+    """Both hoists raise OperationValueError before host.get_fact is reached.
+
+    present=False+members hits require_absent_args_unset; present=True with
+    members omitted hits require_firewall_group_members. These run without
+    pyinfra host context: reaching the fact lookup would raise a context
+    error instead, so passing proves both checks precede Version.
+    """
+
+    with pytest.raises(OperationValueError):
+        list(firewall_group._inner(**kwargs))
 
 
 @pytest.mark.parametrize("identity", [None, "", "   ", "\n"])
@@ -568,6 +623,39 @@ def test_static_route_exact_body_prunes_an_undeclared_next_hop() -> None:
     assert planned == [
         PlannedCommand(["delete", *route, "203.0.113.1", "distance"]),
         PlannedCommand(["delete", *route, "203.0.113.2"]),
+    ]
+
+
+def test_firewall_group_exact_body_prunes_undeclared_member_and_description() -> None:
+    """TOTAL-body: an omitted member and description are deleted, not unmanaged."""
+
+    host = _ConfigurationHost(
+        {
+            "firewall": {
+                "group": {
+                    "address-group": {
+                        "pyfw": {
+                            "address": ["192.0.2.10", "192.0.2.11", "192.0.2.12"],
+                            "description": "lab",
+                        }
+                    }
+                }
+            }
+        }
+    )
+    scopes = render_firewall_group(
+        "1.5",
+        "pyfw",
+        "address",
+        members=["192.0.2.10", "192.0.2.11"],
+    )
+
+    planned = _plan_scopes(host, scopes)
+
+    path = ["firewall", "group", "address-group", "pyfw"]
+    assert planned == [
+        PlannedCommand(["delete", *path, "address", "192.0.2.12"]),
+        PlannedCommand(["delete", *path, "description"]),
     ]
 
 
