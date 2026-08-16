@@ -2,9 +2,9 @@
 
 Typed operations are renderers (A2, D6). This module holds the ``Scope``
 algebra, the helpers every renderer shares, and the per-op renderer
-functions themselves — :func:`render_system_basics` is the first; later
-phases add their own. There is no I/O and no pyinfra state. Callers pass
-values in and get values out.
+functions themselves — :func:`render_system_basics` and
+:func:`render_interface` so far; later phases add their own. There is no
+I/O and no pyinfra state. Callers pass values in and get values out.
 
 Layer contract: a renderer maps a desired keyword model plus a schema key
 to ``list[Scope]``. ``operations.py`` feeds those scopes to the shared
@@ -35,7 +35,9 @@ __all__ = [
     "RenderError",
     "Scope",
     "coerce_token",
+    "render_interface",
     "render_system_basics",
+    "require_absent_args_unset",
     "schema_key",
 ]
 
@@ -165,6 +167,23 @@ _SYSTEM_BASICS_PATHS: dict[str, dict[str, list[str]]] = {
 _SYSTEM_BASICS_SCALARS = frozenset({"hostname", "domain_name", "time_zone"})
 _SYSTEM_BASICS_LISTS = frozenset({"name_servers", "search_domains"})
 
+# D9 seam: 1.4 and 1.5 emit the same R§2 modern-baseline interface types
+# (ethernet, loopback, dummy). Tables are keyed by schema anyway so a later
+# fork does not break this signature.
+_INTERFACE_TYPE_SET = frozenset({"ethernet", "loopback", "dummy"})
+_INTERFACE_TYPES: dict[str, frozenset[str]] = {
+    "1.4": _INTERFACE_TYPE_SET,
+    "1.5": _INTERFACE_TYPE_SET,
+}
+
+# values top-level key -> typed argument to use instead (D10).
+_INTERFACE_TYPED_KEYS: dict[str, str] = {
+    "address": "addresses",
+    "description": "description",
+    "mtu": "mtu",
+    "disable": "disabled",
+}
+
 
 def _validated_path(path: list[str]) -> list[str]:
     try:
@@ -179,6 +198,19 @@ def _validated_leaf(value: str | list[str], *, field: str, where: str = "argumen
     except TreeError as error:
         raise RenderError(str(error)) from error
     return normalized[field]
+
+
+def require_absent_args_unset(present: bool, **desired: object) -> None:
+    """Reject desired-state kwargs when ``present=False`` (ARCHITECTURE §4).
+
+    Schema-independent: callers may invoke this before the Version fact.
+    """
+
+    if present:
+        return
+    for name, value in desired.items():
+        if value is not None:
+            raise RenderError(f"{name} must be omitted when present=False")
 
 
 def render_system_basics(
@@ -231,4 +263,97 @@ def render_system_basics(
                 raise RenderError(f"{field} must be a string")
         node = _validated_leaf(value, field=field, where=field)
         scopes.append(Scope(path=path, intent=Exact(node=node)))
+    return scopes
+
+
+def render_interface(
+    schema: str,
+    interface: str,
+    interface_type: str,
+    *,
+    addresses: list[str] | None = None,
+    description: str | None = None,
+    mtu: str | int | None = None,
+    disabled: bool | None = None,
+    values: dict[str, object] | None = None,
+    present: bool = True,
+) -> list[Scope]:
+    """Render one ``interfaces <type> <name>`` node as disjoint ``Scope`` values.
+
+    Per-field ownership: ``None`` is unmanaged. ``addresses=[]`` is
+    own-and-empty (``Absent`` at the address leaf). ``disabled`` is a
+    tri-state (``True`` → presence node, ``False`` → ``Absent``, ``None``
+    omitted). All typed args ``None`` and no ``values`` ensures a bare
+    interface via ``Merge({})``. ``present=False`` is a single ``Absent``
+    at the interface path; every desired-state argument must be unset.
+    """
+
+    try:
+        allowed_types = _INTERFACE_TYPES[schema]
+    except KeyError as error:
+        raise RenderError(f"unknown schema {schema!r}") from error
+    if interface_type not in allowed_types:
+        allowed = ", ".join(sorted(allowed_types))
+        raise RenderError(f"unknown interface_type {interface_type!r}; allowed types: {allowed}")
+
+    desired_args: dict[str, object] = {
+        "addresses": addresses,
+        "description": description,
+        "mtu": mtu,
+        "disabled": disabled,
+        "values": values,
+    }
+    require_absent_args_unset(present, **desired_args)
+
+    if not isinstance(interface, str):
+        raise RenderError("interface must be a string")
+    _validated_leaf(interface, field="interface", where="interface")
+    path = _validated_path(["interfaces", interface_type, interface])
+
+    if not present:
+        return [Scope(path=path, intent=Absent())]
+
+    if all(value is None for value in desired_args.values()):
+        return [Scope(path=path, intent=Merge({}))]
+
+    scopes: list[Scope] = []
+    if addresses is not None:
+        address_path = _validated_path([*path, "address"])
+        if not isinstance(addresses, list):
+            raise RenderError("addresses must be a list of strings")
+        if addresses == []:
+            scopes.append(Scope(path=address_path, intent=Absent()))
+        else:
+            node = _validated_leaf(addresses, field="addresses", where="addresses")
+            scopes.append(Scope(path=address_path, intent=Exact(node=node)))
+    if description is not None:
+        if not isinstance(description, str):
+            raise RenderError("description must be a string")
+        node = _validated_leaf(description, field="description", where="description")
+        scopes.append(Scope(path=_validated_path([*path, "description"]), intent=Exact(node=node)))
+    if mtu is not None:
+        token = coerce_token(mtu)
+        node = _validated_leaf(token, field="mtu", where="mtu")
+        scopes.append(Scope(path=_validated_path([*path, "mtu"]), intent=Exact(node=node)))
+    if disabled is not None:
+        if not isinstance(disabled, bool):
+            raise RenderError("disabled must be a bool")
+        disable_path = _validated_path([*path, "disable"])
+        if disabled:
+            scopes.append(Scope(path=disable_path, intent=Exact(node={})))
+        else:
+            scopes.append(Scope(path=disable_path, intent=Absent()))
+    if values is not None:
+        if isinstance(values, dict):
+            for key in values:
+                if key in _INTERFACE_TYPED_KEYS:
+                    typed = _INTERFACE_TYPED_KEYS[key]
+                    raise RenderError(
+                        f"values key {key!r} collides with the typed {typed} argument"
+                    )
+        try:
+            subtree = normalize_tree(values, strict=True, _where="values")
+        except TreeError as error:
+            raise RenderError(str(error)) from error
+        scopes.append(Scope(path=path, intent=Merge(subtree=subtree)))
     return scopes

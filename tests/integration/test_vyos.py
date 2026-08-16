@@ -15,6 +15,7 @@ from pyinfra_vyos import (
     config,
     config_load,
     config_save,
+    interface,
     system_basics,
 )
 from pyinfra_vyos._cli import sg_probe, sg_vbash_run
@@ -299,3 +300,68 @@ def test_system_basics_noops_when_the_delta_is_empty(vbash_shim: Path) -> None:
     _state, meta = prepare(system_basics, name_servers=[], search_domains=[])
 
     assert not meta.will_change
+
+
+def test_interface_prepare_renders_the_five_command_sequence(vbash_shim: Path) -> None:
+    """Fixture Configuration is {}; a new dummy address plans as a set."""
+
+    state, meta = prepare(
+        interface,
+        interface="dum0",
+        interface_type="dummy",
+        addresses=["192.0.2.1/32"],
+    )
+    commands = operation_commands(state)
+
+    assert meta.will_change
+    assert len(commands) == 5
+    probe, mkdir, upload, chmod, run = commands
+    assert isinstance(probe, StringCommand)
+    assert probe.get_raw_value() == sg_probe().get_raw_value()
+    assert mkdir.get_raw_value().startswith("mkdir -m 700 ")
+    assert isinstance(upload, FileUploadCommand)
+    assert upload.dest.endswith("/session.sh")
+    assert isinstance(upload.src, StringIO)
+    script = upload.src.getvalue()
+    assert "set interfaces dummy dum0 address 192.0.2.1/32" in script
+    assert chmod.get_raw_value().startswith("chmod 600 ")
+    rendered = run.get_raw_value()
+    assert rendered == sg_vbash_run(upload.dest, upload.dest[: -len("/session.sh")]).get_raw_value()
+    assert vbash_shim.is_file()
+
+
+def test_interface_absent_on_empty_tree_noops(vbash_shim: Path) -> None:
+    """Fixture Configuration is {}; present=False of a missing node noops."""
+
+    _state, meta = prepare(interface, interface="dum0", interface_type="dummy", present=False)
+
+    assert not meta.will_change
+    assert vbash_shim.is_file()
+
+
+def test_interface_invalid_type_surfaces_as_operation_value_error(vbash_shim: Path) -> None:
+    with pytest.raises(OperationValueError):
+        prepare(interface, interface="dum0", interface_type="bridge")
+    assert vbash_shim.is_file()
+
+
+def test_interface_typed_key_collision_surfaces_as_operation_value_error(vbash_shim: Path) -> None:
+    with pytest.raises(OperationValueError):
+        prepare(
+            interface,
+            interface="dum0",
+            interface_type="dummy",
+            values={"address": ["192.0.2.1/32"]},
+        )
+    assert vbash_shim.is_file()
+
+
+def test_interface_without_vbash_fails_closed_on_unknown_version() -> None:
+    """@local has no vbash, so Version is default/empty and the gate fails closed."""
+
+    with pytest.raises(OperationValueError) as caught:
+        prepare(interface, interface="dum0", interface_type="dummy")
+
+    message = str(caught.value)
+    assert "config" in message
+    assert "config_load" in message

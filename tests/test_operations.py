@@ -24,6 +24,7 @@ from pyinfra_vyos.operations import (
     config,
     config_load,
     config_save,
+    interface,
     system_basics,
 )
 
@@ -142,6 +143,7 @@ def test_package_exports_the_public_primitives() -> None:
         "config",
         "config_load",
         "config_save",
+        "interface",
         "system_basics",
     ]
     for exported in pyinfra_vyos.__all__:
@@ -169,11 +171,66 @@ def test_system_basics_signature_is_keyword_only() -> None:
     assert parameters["save"].default is False
 
 
+def test_interface_signature_is_positional_name_then_keyword_only() -> None:
+    parameters = inspect.signature(interface).parameters
+
+    assert list(parameters) == [
+        "interface",
+        "interface_type",
+        "addresses",
+        "description",
+        "mtu",
+        "disabled",
+        "values",
+        "present",
+        "save",
+    ]
+    assert parameters["interface"].kind is parameters["interface"].POSITIONAL_OR_KEYWORD
+    for name in (
+        "interface_type",
+        "addresses",
+        "description",
+        "mtu",
+        "disabled",
+        "values",
+        "present",
+        "save",
+    ):
+        assert parameters[name].kind is parameters[name].KEYWORD_ONLY
+    assert parameters["interface"].default is inspect.Parameter.empty
+    assert parameters["interface_type"].default is inspect.Parameter.empty
+    assert parameters["addresses"].default is None
+    assert parameters["description"].default is None
+    assert parameters["mtu"].default is None
+    assert parameters["disabled"].default is None
+    assert parameters["values"].default is None
+    assert parameters["present"].default is True
+    assert parameters["save"].default is False
+
+
 def test_system_basics_all_none_rejects_before_any_host_access() -> None:
     """Validation raises OperationValueError before host.get_fact is reached."""
 
     with pytest.raises(OperationValueError):
         list(system_basics._inner())
+
+
+def test_interface_present_false_rejects_desired_args_before_any_host_access() -> None:
+    """Validation raises OperationValueError before host.get_fact is reached.
+
+    These run without pyinfra host context: reaching the fact lookup would
+    raise a context error instead, so passing proves validation comes first.
+    """
+
+    with pytest.raises(OperationValueError):
+        list(
+            interface._inner(
+                "dum0",
+                interface_type="dummy",
+                present=False,
+                addresses=["192.0.2.1/32"],
+            )
+        )
 
 
 def test_nonexistent_path_is_rejected(tmp_path: Path) -> None:
