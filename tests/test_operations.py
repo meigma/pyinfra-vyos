@@ -14,12 +14,13 @@ from pyinfra.context import ctx_state
 
 import pyinfra_vyos
 from pyinfra_vyos._cli import sg_probe, sg_vbash_run
-from pyinfra_vyos._render import Absent, Exact, Merge, Scope, render_static_route
+from pyinfra_vyos._render import Absent, Exact, Merge, Scope, render_static_route, render_user
 from pyinfra_vyos._session import SENTINEL_CHANGED, PlannedCommand
 from pyinfra_vyos.facts import Configuration
 from pyinfra_vyos.operations import (
     _guarded,
     _plan_scopes,
+    _require_deletable_identity,
     _SourceError,
     config,
     config_load,
@@ -27,6 +28,7 @@ from pyinfra_vyos.operations import (
     interface,
     static_route,
     system_basics,
+    user,
 )
 
 _VALID_CONFIG = "set system host-name pyinfra-vyos\n"
@@ -147,6 +149,7 @@ def test_package_exports_the_public_primitives() -> None:
         "interface",
         "static_route",
         "system_basics",
+        "user",
     ]
     for exported in pyinfra_vyos.__all__:
         assert getattr(pyinfra_vyos, exported) is not None
@@ -275,6 +278,69 @@ def test_static_route_schema_independent_rejections_surface_before_any_host_acce
 
     with pytest.raises(OperationValueError):
         list(static_route._inner(**kwargs))
+
+
+def test_user_signature_is_positional_user_then_keyword_only() -> None:
+    parameters = inspect.signature(user).parameters
+
+    assert list(parameters) == [
+        "user",
+        "full_name",
+        "encrypted_password",
+        "ssh_keys",
+        "present",
+        "save",
+    ]
+    assert parameters["user"].kind is parameters["user"].POSITIONAL_OR_KEYWORD
+    for name in ("full_name", "encrypted_password", "ssh_keys", "present", "save"):
+        assert parameters[name].kind is parameters[name].KEYWORD_ONLY
+    assert parameters["user"].default is inspect.Parameter.empty
+    assert parameters["full_name"].default is None
+    assert parameters["encrypted_password"].default is None
+    assert parameters["ssh_keys"].default is None
+    assert parameters["present"].default is True
+    assert parameters["save"].default is False
+
+
+def test_user_present_false_rejects_desired_args_before_any_host_access() -> None:
+    """require_absent_args_unset runs before any fact read.
+
+    These run without pyinfra host context: reaching the fact lookup would
+    raise a context error instead, so passing proves validation comes first.
+
+    Plaintext ``encrypted_password`` is renderer-layer (after Version), so it
+    cannot be proven host-free here. Sibling ``tests/test_render.py`` covers
+    hash-only rejection without echoing the value.
+    """
+
+    with pytest.raises(OperationValueError, match="full_name"):
+        list(user._inner("alice", present=False, full_name="Alice"))
+
+
+@pytest.mark.parametrize("identity", [None, "", "   ", "\n"])
+def test_require_deletable_identity_fails_closed_when_unestablished(
+    identity: object,
+) -> None:
+    with pytest.raises(OperationValueError, match="could not be established") as caught:
+        _require_deletable_identity(identity, "alice")
+    assert "config" in str(caught.value)
+
+
+def test_require_deletable_identity_refuses_self_deletion() -> None:
+    with pytest.raises(OperationValueError, match="self-deletion") as caught:
+        _require_deletable_identity("alice", "alice")
+    message = str(caught.value)
+    assert "alice" in message
+    assert "config" in message
+
+
+def test_require_deletable_identity_strips_reported_identity() -> None:
+    with pytest.raises(OperationValueError, match="self-deletion"):
+        _require_deletable_identity("alice\n", "alice")
+
+
+def test_require_deletable_identity_allows_a_different_user() -> None:
+    _require_deletable_identity("alice", "bob")
 
 
 def test_nonexistent_path_is_rejected(tmp_path: Path) -> None:
@@ -576,6 +642,50 @@ def test_plan_scopes_mixed_scopes_keep_per_scope_sensitivity() -> None:
             sensitive=True,
         ),
     ]
+
+
+_USER_KEYS_TREE: dict[str, Any] = {
+    "system": {
+        "login": {
+            "user": {
+                "alice": {
+                    "authentication": {
+                        "public-keys": {
+                            "laptop": {"type": "ssh-ed25519", "key": "AAAA"},
+                            "stale": {"type": "ssh-rsa", "key": "BBBB"},
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+_USER_KEYS_PATH = ["system", "login", "user", "alice", "authentication", "public-keys"]
+
+
+def test_user_ssh_keys_exact_set_removes_an_omitted_key() -> None:
+    """An active key omitted from ssh_keys is deleted; declared keys stay."""
+
+    host = _ConfigurationHost(_USER_KEYS_TREE)
+
+    planned = _plan_scopes(
+        host,
+        render_user("1.5", "alice", ssh_keys={"laptop": {"type": "ssh-ed25519", "key": "AAAA"}}),
+    )
+
+    assert planned == [PlannedCommand(["delete", *_USER_KEYS_PATH, "stale"])]
+
+
+def test_user_ssh_keys_empty_mapping_owns_and_empties_the_subtree() -> None:
+    """ssh_keys={} clears the key set and noops once it is already empty."""
+
+    planned = _plan_scopes(
+        _ConfigurationHost(_USER_KEYS_TREE),
+        render_user("1.5", "alice", ssh_keys={}),
+    )
+
+    assert planned == [PlannedCommand(["delete", *_USER_KEYS_PATH])]
+    assert _plan_scopes(_ConfigurationHost({}), render_user("1.5", "alice", ssh_keys={})) is None
 
 
 def test_plan_scopes_empty_delta_returns_none() -> None:

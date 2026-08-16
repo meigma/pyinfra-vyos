@@ -16,9 +16,11 @@ from pyinfra_vyos._render import (
     render_interface,
     render_static_route,
     render_system_basics,
+    render_user,
     require_absent_args_unset,
     schema_key,
 )
+from pyinfra_vyos._tree import diff_tree, select_subtree
 
 
 def _is_prefix(left: list[str], right: list[str]) -> bool:
@@ -214,6 +216,23 @@ def test_assert_disjoint_accepts_disjoint_paths() -> None:
             Scope(["system", "host-name"], Exact(["a"])),
             Scope(["system", "domain-name"], Exact(["b"])),
             Scope(["system", "time-zone"], Absent()),
+        ],
+    )
+
+
+def test_assert_disjoint_accepts_authentication_sibling_paths() -> None:
+    """Nested authentication leaves are siblings, not prefixes.
+
+    Round-1 counterexample class: ``encrypted-password`` and ``public-keys``
+    share the ``authentication`` parent but neither path prefixes the other.
+    """
+
+    root = ["system", "login", "user", "alice"]
+    assert_disjoint(
+        [
+            Scope([*root, "full-name"], Exact(["Alice"])),
+            Scope([*root, "authentication", "encrypted-password"], Exact(["$6$x"])),
+            Scope([*root, "authentication", "public-keys"], Exact({"k": {}})),
         ],
     )
 
@@ -792,3 +811,213 @@ def test_render_static_route_emits_r2_path_tokens(
     assert len(scopes) == 1
     assert scopes[0].path == _static_route_path(destination, ipv6=ipv6)
     assert isinstance(scopes[0].intent, Exact)
+
+
+# --- render_user -------------------------------------------------------------
+
+
+def _user_path(name: str = "alice") -> list[str]:
+    return ["system", "login", "user", name]
+
+
+# Accepted crypt forms and lock markers. These are synthetic (not live hashes).
+_USER_ACCEPTED_HASHES = (
+    "$6$rounds=656000$salt$digest",
+    "$y$j9T$salt$hash",
+    "$2b$12$saltandsalthashhashhashhashhu",
+    "!",
+    "*",
+)
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+@pytest.mark.parametrize("value", _USER_ACCEPTED_HASHES)
+def test_render_user_accepts_encrypted_password_forms(schema: str, value: str) -> None:
+    scopes = render_user(schema, "alice", encrypted_password=value)
+    assert_disjoint(scopes)
+    assert len(scopes) == 1
+    assert scopes[0].path == [*_user_path(), "authentication", "encrypted-password"]
+    assert scopes[0].intent == Exact([value])
+    assert scopes[0].sensitive is True
+
+
+@pytest.mark.parametrize("value", ["hunter2", "", "!!", "*x"])
+def test_render_user_rejects_encrypted_password_without_echoing(value: str) -> None:
+    with pytest.raises(RenderError) as caught:
+        render_user("1.4", "alice", encrypted_password=value)
+
+    message = str(caught.value)
+    # Redaction (D11): never interpolate the supplied value into the error.
+    # Empty string is a substring of every message, so skip that case.
+    if value:
+        assert value not in message
+    assert "encrypted_password" in message
+    assert "$-prefixed" in message
+    assert "mkpasswd" in message
+    assert "passlib" in message
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+def test_render_user_only_encrypted_password_scope_is_sensitive(schema: str) -> None:
+    scopes = render_user(
+        schema,
+        "alice",
+        full_name="Alice Admin",
+        encrypted_password="$6$rounds=656000$salt$digest",
+        ssh_keys={"laptop": {"type": "ssh-ed25519", "key": "AAAA"}},
+    )
+    assert_disjoint(scopes)
+    by_suffix = {tuple(scope.path[len(_user_path()) :]): scope for scope in scopes}
+    assert by_suffix[("full-name",)].sensitive is False
+    assert by_suffix[("authentication", "encrypted-password")].sensitive is True
+    assert by_suffix[("authentication", "public-keys")].sensitive is False
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+def test_render_user_ssh_keys_exact_set_passes_nested_body_keys(schema: str) -> None:
+    scopes = render_user(
+        schema,
+        "alice",
+        ssh_keys={
+            "laptop": {
+                "type": "ssh-ed25519",
+                "key": "AAAA",
+                "options": "no-agent-forwarding",
+            }
+        },
+    )
+    assert_disjoint(scopes)
+    assert len(scopes) == 1
+    assert scopes[0].path == [*_user_path(), "authentication", "public-keys"]
+    assert scopes[0].intent == Exact(
+        {
+            "laptop": {
+                "type": ["ssh-ed25519"],
+                "key": ["AAAA"],
+                "options": ["no-agent-forwarding"],
+            }
+        }
+    )
+    assert scopes[0].sensitive is False
+
+
+def test_render_user_ssh_keys_exact_set_removes_an_omitted_key() -> None:
+    """An active key omitted from ssh_keys is deleted; declared keys stay."""
+
+    active = {
+        "system": {
+            "login": {
+                "user": {
+                    "alice": {
+                        "authentication": {
+                            "public-keys": {
+                                "laptop": {"type": "ssh-ed25519", "key": "AAAA"},
+                                "stale": {"type": "ssh-rsa", "key": "BBBB"},
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    scopes = render_user(
+        "1.5",
+        "alice",
+        ssh_keys={"laptop": {"type": "ssh-ed25519", "key": "AAAA"}},
+    )
+    assert_disjoint(scopes)
+    assert len(scopes) == 1
+    scope = scopes[0]
+    assert isinstance(scope.intent, Exact)
+    deletes, sets = diff_tree(
+        select_subtree(active, scope.path),
+        scope.intent.node,
+        scope.path,
+        replace=True,
+    )
+    assert deletes == [[*scope.path, "stale"]]
+    assert sets == []
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+def test_render_user_empty_ssh_keys_is_absent_at_leaf(schema: str) -> None:
+    scopes = render_user(schema, "alice", ssh_keys={})
+    assert_disjoint(scopes)
+    assert len(scopes) == 1
+    assert scopes[0].path == [*_user_path(), "authentication", "public-keys"]
+    assert isinstance(scopes[0].intent, Absent)
+    assert scopes[0].sensitive is False
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+def test_render_user_full_kwarg_matrix_is_disjoint(schema: str) -> None:
+    # No values pass-through exists on this renderer; typed fields only.
+    scopes = render_user(
+        schema,
+        "alice",
+        full_name="Alice Admin",
+        encrypted_password="$6$rounds=656000$salt$digest",
+        ssh_keys={"laptop": {"type": "ssh-ed25519", "key": "AAAA"}},
+    )
+    assert_disjoint(scopes)
+    paths = [scope.path for scope in scopes]
+    assert paths == [
+        [*_user_path(), "full-name"],
+        [*_user_path(), "authentication", "encrypted-password"],
+        [*_user_path(), "authentication", "public-keys"],
+    ]
+    encrypted = paths[1][len(_user_path()) :]
+    public_keys = paths[2][len(_user_path()) :]
+    assert encrypted == ["authentication", "encrypted-password"]
+    assert public_keys == ["authentication", "public-keys"]
+    assert not _is_prefix(encrypted, public_keys)
+    assert not _is_prefix(public_keys, encrypted)
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+def test_render_user_all_none_is_bare_merge(schema: str) -> None:
+    scopes = render_user(schema, "alice")
+    assert_disjoint(scopes)
+    assert scopes == [Scope(_user_path(), Merge({}))]
+    assert scopes[0].sensitive is False
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"full_name": "Alice"},
+        {"encrypted_password": "$6$rounds=656000$salt$digest"},
+        {"ssh_keys": {"laptop": {"type": "ssh-ed25519", "key": "AAAA"}}},
+    ],
+)
+def test_render_user_present_false_rejects_desired_args(kwargs: dict[str, object]) -> None:
+    with pytest.raises(RenderError) as caught:
+        render_user("1.4", "alice", present=False, **kwargs)  # type: ignore[arg-type]
+
+    name = next(iter(kwargs))
+    assert name in str(caught.value)
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+def test_render_user_present_false_alone_is_absent(schema: str) -> None:
+    scopes = render_user(schema, "alice", present=False)
+    assert_disjoint(scopes)
+    assert scopes == [Scope(_user_path(), Absent())]
+    assert scopes[0].sensitive is False
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+def test_render_user_emits_r2_path_tokens(schema: str) -> None:
+    scopes = render_user(
+        schema,
+        "alice",
+        full_name="Alice Admin",
+        encrypted_password="$6$rounds=656000$salt$digest",
+        ssh_keys={"laptop": {"type": "ssh-ed25519", "key": "AAAA"}},
+    )
+    assert_disjoint(scopes)
+    assert [scope.path for scope in scopes] == [
+        ["system", "login", "user", "alice", "full-name"],
+        ["system", "login", "user", "alice", "authentication", "encrypted-password"],
+        ["system", "login", "user", "alice", "authentication", "public-keys"],
+    ]

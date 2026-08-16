@@ -24,6 +24,7 @@ from typing import IO, Any, TypeVar
 from pyinfra import host, state
 from pyinfra.api import FileUploadCommand, QuoteString, StringCommand, operation
 from pyinfra.api.exceptions import OperationValueError
+from pyinfra.facts.server import User as ServerUser
 
 from pyinfra_vyos._cli import session_run_sequence, sg_probe, sg_vbash_run
 from pyinfra_vyos._parse import stream_is_nonempty
@@ -36,6 +37,7 @@ from pyinfra_vyos._render import (
     render_interface,
     render_static_route,
     render_system_basics,
+    render_user,
     require_absent_args_unset,
     schema_key,
 )
@@ -49,7 +51,15 @@ from pyinfra_vyos._session import (
 from pyinfra_vyos._tree import TreeError, diff_tree, normalize_tree, select_subtree, validate_path
 from pyinfra_vyos.facts import Configuration, PendingSave, Version
 
-__all__ = ["config", "config_load", "config_save", "interface", "static_route", "system_basics"]
+__all__ = [
+    "config",
+    "config_load",
+    "config_save",
+    "interface",
+    "static_route",
+    "system_basics",
+    "user",
+]
 
 _T = TypeVar("_T")
 
@@ -157,6 +167,26 @@ def _plan_scopes(host: Any, scopes: list[Scope]) -> list[PlannedCommand] | None:
         )
         planned.extend(PlannedCommand(["set", *argv], sensitive=scope.sensitive) for argv in sets)
     return planned or None
+
+
+def _require_deletable_identity(identity: object, target: str) -> None:
+    """Refuse self-deletion; fail closed when the connected identity is unknown.
+
+    ``identity`` is the ``pyinfra.facts.server.User`` fact value (``echo $USER``).
+    Extracted so the empty/undeterminable branch is unit-testable without a host.
+    """
+
+    reported = identity.strip() if isinstance(identity, str) else ""
+    if not reported:
+        raise OperationValueError(
+            "connected identity could not be established (self-deletion guard); "
+            "use the config operation as an escape hatch"
+        )
+    if reported == target:
+        raise OperationValueError(
+            f"refusing to delete the connected user {target!r} "
+            "(self-deletion guard); use the config operation as an escape hatch"
+        )
 
 
 @operation(
@@ -595,6 +625,107 @@ def static_route(
     commands = _plan_scopes(host, scopes)
     if commands is None:
         host.noop(f"static route {destination} already matches")
+        return
+    staging = staging_dir()
+    yield from session_run_sequence(staging, build_commands_script(staging, commands, save=save))
+
+
+@operation()
+def user(
+    user: str,
+    *,
+    full_name: str | None = None,
+    encrypted_password: str | None = None,
+    ssh_keys: dict[str, dict[str, str]] | None = None,
+    present: bool = True,
+    save: bool = False,
+) -> Generator[StringCommand | FileUploadCommand, None, None]:
+    """Configure one VyOS login user.
+
+    Each keyword is independently owned. ``None`` (the default) leaves that
+    field unmanaged. All fields ``None`` still ensures the bare user node
+    exists. ``ssh_keys`` is an exact set of key-id to ``{type, key}`` when
+    provided. ``present=False`` deletes the user; every desired argument
+    must then be left unset.
+
+    **Hash-only password**: there is no plaintext mode. ``encrypted_password``
+    accepts a pre-hashed crypt string (must start with ``$``, or be the ``!`` / ``*`` lock
+    markers). Callers hash controller-side (``mkpasswd``, passlib) so
+    plaintext never enters this library. Comparison is a stable-text diff
+    against the active tree. The hash reaches controller memory via the
+    :class:`~pyinfra_vyos.facts.Configuration` fact (the already-stated
+    wave-1 exposure) and travels inside the 0600 session script.
+
+    **Sensitive-output suppression**: on a failing password command only
+    the ordinal/verb and a fixed suppression notice are logged — captured
+    device output is not forwarded. COMMIT failure output remains forwarded
+    for all operations and is documented as potentially secret-bearing
+    residual exposure.
+
+    **Deletion guard**: ``present=False`` refuses to delete the connected
+    identity reported by pyinfra's ``server.User`` fact (``echo $USER``).
+    Empty or undeterminable identity fails closed. Limits: reported
+    ``$USER`` semantics, not an authenticated connector-identity proof;
+    connector privilege transformation can mislead it; no last-admin
+    detection; no remote-auth modeling; :func:`config` overrides the
+    guard. User deletion is a lockout class — commit is immediate;
+    ``save=False`` limits reboot persistence only. Out-of-band recovery
+    (console / OOB access) is assumed if a change severs the controller
+    session. The verify-then-persist workflow is ``user(..., save=False)``
+    then :func:`config_save`.
+
+    **Concurrency precondition**: the caller MUST serialize all mutation
+    sessions per host — at most one mutation session may run at a time,
+    including runs from the same controller (§2 / D4). Overlapping
+    mutation runs are out of contract.
+
+    **Save**: ``save=True`` persists only when this run commits (D13). An
+    empty controller delta noops regardless of ``save``. Save is
+    device-global; typed ownership does not scope persistence.
+
+    **Version gate**: the target's :class:`~pyinfra_vyos.facts.Version`
+    must map to a known 1.4 or 1.5 schema (D9). An unrecognized,
+    unqualified, or missing version fails closed with
+    :class:`~pyinfra.api.exceptions.OperationValueError`; use the
+    version-agnostic :func:`config` / :func:`config_load` on such hosts.
+
+    Noop labels and the deletion-guard errors carry the username only.
+    Renderer rejections name the offending argument and may echo its value —
+    except ``encrypted_password``, whose value is never echoed (D11).
+    """
+
+    # Schema-independent: present=False forbids desired args. Must run before
+    # any fact read (§4).
+    _guarded(
+        require_absent_args_unset,
+        present,
+        full_name=full_name,
+        encrypted_password=encrypted_password,
+        ssh_keys=ssh_keys,
+    )
+    if not present:
+        # The deletion guard is itself a fact read. §4's letter says
+        # schema-independent validation before fact reads;
+        # require_absent_args_unset satisfies that. This identity read then
+        # precedes Version because delete grammar is still schema-keyed —
+        # Version gating applies on the delete path after the guard.
+        identity = host.get_fact(ServerUser)
+        _require_deletable_identity(identity, user)
+
+    version_map = host.get_fact(Version) or {}
+    schema = _guarded(schema_key, version_map.get("version", ""))
+    scopes = _guarded(
+        render_user,
+        schema,
+        user,
+        full_name=full_name,
+        encrypted_password=encrypted_password,
+        ssh_keys=ssh_keys,
+        present=present,
+    )
+    commands = _plan_scopes(host, scopes)
+    if commands is None:
+        host.noop(f"user {user} already matches")
         return
     staging = staging_dir()
     yield from session_run_sequence(staging, build_commands_script(staging, commands, save=save))
