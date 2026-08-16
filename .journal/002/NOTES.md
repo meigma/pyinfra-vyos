@@ -150,3 +150,24 @@ Same orchestration pattern in `feat/system-basics`; PR #10 open, CI green.
   on VyOS 2026.03 (q3-domain-interaction.txt). Canonicalization hotspots
   clean: domain-search set order preserved, time-zone form verbatim.
 - Appliance tier 8/8.
+
+## 2026-08-15 19:10 — Phase 3 implemented; PR #11 open for review
+Same pattern in `feat/interface`; PR #11 open, CI green.
+- Single 3-agent wave (disjoint file sets — no clobbering this time):
+  render_interface, interface op (+@local), appliance dummy cycle. One
+  mid-flight contract query answered over hub.
+- Review (approve-with-fixes): P2 — present=False validation ran after the
+  Version read, violating §4 ordering; hoisted into shared
+  require_absent_args_unset helper (reusable by phases 4-7). P3 —
+  disabled=True added to the lockout docstring.
+- INCIDENT: first corrective agent died and overwrote tests/test_render.py
+  with an elided read-view (literal `…` markers). Root checkout clean;
+  restore agent recovered the 114-passing file and applied both fixes.
+  Process change adopted: commit the worktree immediately after each green
+  gate so restores are `git restore`, not transcript archaeology.
+- Appliance 9/9: dummy full cycle (create → noop → address prune → disable
+  transitions → delete → delete-noop). Canonicalization clean: device
+  echoes 192.0.2.65/32, description, mtu '1400' verbatim. Ethernet grammar
+  fixture-asserted only — NOT hardware-verified (management path never
+  touched); recorded per plan risk table.
+- Q4 recorded in the op docstring: interface_type explicit by design.
