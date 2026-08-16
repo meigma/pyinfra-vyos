@@ -1118,10 +1118,24 @@ def test_render_firewall_group_port_members_are_coerced_to_strings(schema: str) 
     assert scopes[0].sensitive is False
 
 
-@pytest.mark.parametrize("value", [True, False])
-def test_render_firewall_group_rejects_bool_member(value: bool) -> None:
-    with pytest.raises(RenderError):
-        render_firewall_group("1.4", "g1", "port", members=[value])
+@pytest.mark.parametrize("member", [True, False, None, {}, [], 1.5, b"80"])
+def test_render_firewall_group_rejects_non_token_member_uniformly(member: object) -> None:
+    """Every non-str/int element reports the same error as a non-list members."""
+
+    with pytest.raises(RenderError) as caught:
+        render_firewall_group("1.4", "g1", "port", members=[member])  # type: ignore[list-item]
+
+    assert str(caught.value) == "members must be a list of strings or ints"
+
+
+@pytest.mark.parametrize("members", ["192.0.2.1", ("192.0.2.1",), 8080])
+def test_render_firewall_group_rejects_non_list_members(members: object) -> None:
+    """The list-level rejection already uses the wording elements now share."""
+
+    with pytest.raises(RenderError) as caught:
+        render_firewall_group("1.4", "g1", "address", members=members)  # type: ignore[arg-type]
+
+    assert str(caught.value) == "members must be a list of strings or ints"
 
 
 @pytest.mark.parametrize(

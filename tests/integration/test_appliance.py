@@ -1466,6 +1466,19 @@ def test_firewall_group_full_cycle(inventory: Inventory) -> None:
         )
         print(f"pyinfra-vyos phase6 group canon: {artifact}")
 
+        ports_again = apply(
+            firewall_group,
+            inventory=inventory,
+            group=_GROUP_PORTS,
+            group_type="port",
+            members=list(_PORT_MEMBERS),
+            save=False,
+        )
+        assert not ports_again.did_change(), (
+            f"port-group re-apply not idempotent; device echoed {observed_ports!r} "
+            f"for submitted {list(_PORT_MEMBERS)!r}"
+        )
+
         deleted_hosts = apply(
             firewall_group,
             inventory=inventory,

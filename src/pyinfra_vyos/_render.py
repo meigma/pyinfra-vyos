@@ -696,10 +696,9 @@ def render_firewall_group(
     if members:
         coerced: list[str] = []
         for item in members:
-            try:
-                coerced.append(coerce_token(item))
-            except RenderError:
-                raise RenderError("members must be a list of strings or ints") from None
+            if isinstance(item, bool) or not isinstance(item, (str, int)):
+                raise RenderError("members must be a list of strings or ints")
+            coerced.append(coerce_token(item))
         body[member_leaf] = _validated_leaf(coerced, field="members", where="members")
     if description is not None:
         if not isinstance(description, str):

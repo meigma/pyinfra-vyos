@@ -659,6 +659,18 @@ def test_firewall_group_exact_body_prunes_undeclared_member_and_description() ->
     ]
 
 
+def test_firewall_group_empty_body_noops_on_a_converged_empty_group() -> None:
+    """Exact({}) is a bare presence set when absent and nothing when converged."""
+
+    scopes = render_firewall_group("1.5", "pyfw", "address", members=[])
+    converged = _ConfigurationHost({"firewall": {"group": {"address-group": {"pyfw": {}}}}})
+
+    assert _plan_scopes(converged, scopes) is None
+    assert _plan_scopes(_ConfigurationHost({}), scopes) == [
+        PlannedCommand(["set", "firewall", "group", "address-group", "pyfw"])
+    ]
+
+
 def test_plan_scopes_preserves_scope_order_when_delete_follows_set() -> None:
     host = _ConfigurationHost(_PLAN_TREE)
 
