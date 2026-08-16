@@ -191,3 +191,22 @@ commits after each gate (process change from phase 3) — no restore drama.
   (standardize on compressed lowercase). Plan's risk table had assumed
   compression; observation recorded in phase4-route-canon.txt.
 - Total-body prune observed on hardware (2 hops -> 1).
+
+## 2026-08-15 23:15 — Phase 5 implemented; PR #13 open for review
+Same pattern in `feat/user-op`; PR #13 open, CI green. Clean run — no
+worktree incidents (green-state commits + cwd discipline holding).
+- 3-agent wave: render_user (secret validation), user op (deletion guard),
+  appliance cycle. Renderer agent took 28m (largest test surface so far).
+- Review (approve-with-fixes, 5): P2 ssh_keys={} rendered Exact({}) ->
+  non-convergent bare set on the public-keys tag node (succeeds once,
+  hard-fails re-runs) — now Absent like sibling [] semantics; P2 appliance
+  guard probe's bare assert would print the LAB'S REAL HASH into CI logs
+  via pytest assertion rewriting on failure — compares into a boolean now.
+  P3s: redacted assertion message, narrowed docstring never-echo claim,
+  diff-level omitted-key removal test.
+- Appliance 11/11: disposable-user cycle; hash round-trips stable-text
+  (idempotent comparison confirmed on hardware); public-key body echoed
+  VERBATIM (no canonicalization); guard probe: self-deletion of connecting
+  user failed at planning, device untouched (verified by independent read).
+- Secret discipline held end-to-end: hash only in capture lines of the
+  script, never diagnostics; no hash in capture files.
