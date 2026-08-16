@@ -532,8 +532,11 @@ def static_route(
     explicit prefix length: IPv4 owns ``protocols static route <destination>``;
     IPv6 owns ``protocols static route6 <destination>``. A prefix with host
     bits set, and a bare host address with no prefix length, are both
-    planning errors. The caller string is the path token; the device is the
-    canonicalization authority.
+    planning errors. The caller string is the path token, and the lab
+    appliance (VyOS 2026.03) stores route tag-node keys **verbatim** — an
+    expanded/uppercase IPv6 form round-trips unchanged. The consequence is
+    that two textual forms of the same prefix would create two distinct
+    route nodes: standardize on one form (compressed lowercase for IPv6).
 
     **TOTAL-body pruning**: this operation owns the whole route object at
     every depth. Undeclared active next-hops are REMOVED, and so are
