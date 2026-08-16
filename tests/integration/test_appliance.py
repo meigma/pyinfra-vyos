@@ -1139,7 +1139,9 @@ def test_user_full_cycle_and_deletion_guard(inventory: Inventory) -> None:
         assert _leaf_scalar(node.get("full-name")) == _TEST_FULL_NAME
 
         auth = node.get("authentication")
-        assert isinstance(auth, dict), f"authentication missing under {_TEST_USER}: {node!r}"
+        assert isinstance(auth, dict), (
+            f"authentication missing under {_TEST_USER}: keys {sorted(node)}"
+        )
         observed_hash = _leaf_scalar(auth.get("encrypted-password"))
         hash_roundtrip_stable = observed_hash == _TEST_PASSWORD_HASH
 
@@ -1224,7 +1226,11 @@ def test_user_full_cycle_and_deletion_guard(inventory: Inventory) -> None:
 
         vyos_after = _op_mode_login_user(inventory, _CONNECTING_USER)
         assert vyos_after is not None, f"connecting user {_CONNECTING_USER} missing after guard"
-        assert vyos_after.get("authentication") == vyos_auth_before
+        auth_unchanged = vyos_after.get("authentication") == vyos_auth_before
+        assert auth_unchanged, (
+            f"guard probe changed {_CONNECTING_USER}'s authentication subtree "
+            "(contents redacted: secret-bearing)"
+        )
 
         deleted = apply(
             user,

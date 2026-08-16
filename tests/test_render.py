@@ -20,6 +20,7 @@ from pyinfra_vyos._render import (
     require_absent_args_unset,
     schema_key,
 )
+from pyinfra_vyos._tree import diff_tree, select_subtree
 
 
 def _is_prefix(left: list[str], right: list[str]) -> bool:
@@ -897,6 +898,54 @@ def test_render_user_ssh_keys_exact_set_passes_nested_body_keys(schema: str) -> 
             }
         }
     )
+    assert scopes[0].sensitive is False
+
+
+def test_render_user_ssh_keys_exact_set_removes_an_omitted_key() -> None:
+    """An active key omitted from ssh_keys is deleted; declared keys stay."""
+
+    active = {
+        "system": {
+            "login": {
+                "user": {
+                    "alice": {
+                        "authentication": {
+                            "public-keys": {
+                                "laptop": {"type": "ssh-ed25519", "key": "AAAA"},
+                                "stale": {"type": "ssh-rsa", "key": "BBBB"},
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    scopes = render_user(
+        "1.5",
+        "alice",
+        ssh_keys={"laptop": {"type": "ssh-ed25519", "key": "AAAA"}},
+    )
+    assert_disjoint(scopes)
+    assert len(scopes) == 1
+    scope = scopes[0]
+    assert isinstance(scope.intent, Exact)
+    deletes, sets = diff_tree(
+        select_subtree(active, scope.path),
+        scope.intent.node,
+        scope.path,
+        replace=True,
+    )
+    assert deletes == [[*scope.path, "stale"]]
+    assert sets == []
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+def test_render_user_empty_ssh_keys_is_absent_at_leaf(schema: str) -> None:
+    scopes = render_user(schema, "alice", ssh_keys={})
+    assert_disjoint(scopes)
+    assert len(scopes) == 1
+    assert scopes[0].path == [*_user_path(), "authentication", "public-keys"]
+    assert isinstance(scopes[0].intent, Absent)
     assert scopes[0].sensitive is False
 
 

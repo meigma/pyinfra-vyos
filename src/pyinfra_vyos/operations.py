@@ -689,7 +689,9 @@ def user(
     :class:`~pyinfra.api.exceptions.OperationValueError`; use the
     version-agnostic :func:`config` / :func:`config_load` on such hosts.
 
-    Noop and error labels carry the username only — never field values.
+    Noop labels and the deletion-guard errors carry the username only.
+    Renderer rejections name the offending argument and may echo its value —
+    except ``encrypted_password``, whose value is never echoed (D11).
     """
 
     # Schema-independent: present=False forbids desired args. Must run before

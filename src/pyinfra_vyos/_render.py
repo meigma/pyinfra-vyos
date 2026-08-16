@@ -540,7 +540,8 @@ def render_user(
     Per-field ownership: ``None`` is unmanaged. ``encrypted_password`` is
     hash-or-lock-marker only and the Exact scope it emits is the only
     sensitive scope. ``ssh_keys`` is an exact public-key set; body keys
-    are open (D10). All typed args ``None`` ensures the user via
+    are open (D10). ``{}`` is own-and-empty (``Absent`` at the public-keys
+    node). All typed args ``None`` ensures the user via
     ``Merge({})``. ``present=False`` is a single ``Absent`` at the user
     path; every desired-state argument must be unset. There is no
     ``values`` pass-through.
@@ -589,6 +590,9 @@ def render_user(
     if ssh_keys is not None:
         if not isinstance(ssh_keys, dict):
             raise RenderError("ssh_keys must be a mapping of key id to body")
+        if not ssh_keys:
+            scopes.append(Scope(path=_validated_path([*path, *table["ssh_keys"]]), intent=Absent()))
+            return scopes
         for body in ssh_keys.values():
             if not isinstance(body, dict):
                 raise RenderError("ssh_keys values must be mappings")

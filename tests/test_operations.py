@@ -14,7 +14,7 @@ from pyinfra.context import ctx_state
 
 import pyinfra_vyos
 from pyinfra_vyos._cli import sg_probe, sg_vbash_run
-from pyinfra_vyos._render import Absent, Exact, Merge, Scope, render_static_route
+from pyinfra_vyos._render import Absent, Exact, Merge, Scope, render_static_route, render_user
 from pyinfra_vyos._session import SENTINEL_CHANGED, PlannedCommand
 from pyinfra_vyos.facts import Configuration
 from pyinfra_vyos.operations import (
@@ -642,6 +642,50 @@ def test_plan_scopes_mixed_scopes_keep_per_scope_sensitivity() -> None:
             sensitive=True,
         ),
     ]
+
+
+_USER_KEYS_TREE: dict[str, Any] = {
+    "system": {
+        "login": {
+            "user": {
+                "alice": {
+                    "authentication": {
+                        "public-keys": {
+                            "laptop": {"type": "ssh-ed25519", "key": "AAAA"},
+                            "stale": {"type": "ssh-rsa", "key": "BBBB"},
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+_USER_KEYS_PATH = ["system", "login", "user", "alice", "authentication", "public-keys"]
+
+
+def test_user_ssh_keys_exact_set_removes_an_omitted_key() -> None:
+    """An active key omitted from ssh_keys is deleted; declared keys stay."""
+
+    host = _ConfigurationHost(_USER_KEYS_TREE)
+
+    planned = _plan_scopes(
+        host,
+        render_user("1.5", "alice", ssh_keys={"laptop": {"type": "ssh-ed25519", "key": "AAAA"}}),
+    )
+
+    assert planned == [PlannedCommand(["delete", *_USER_KEYS_PATH, "stale"])]
+
+
+def test_user_ssh_keys_empty_mapping_owns_and_empties_the_subtree() -> None:
+    """ssh_keys={} clears the key set and noops once it is already empty."""
+
+    planned = _plan_scopes(
+        _ConfigurationHost(_USER_KEYS_TREE),
+        render_user("1.5", "alice", ssh_keys={}),
+    )
+
+    assert planned == [PlannedCommand(["delete", *_USER_KEYS_PATH])]
+    assert _plan_scopes(_ConfigurationHost({}), render_user("1.5", "alice", ssh_keys={})) is None
 
 
 def test_plan_scopes_empty_delta_returns_none() -> None:
