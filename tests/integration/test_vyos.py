@@ -16,6 +16,7 @@ from pyinfra_vyos import (
     config_load,
     config_save,
     interface,
+    static_route,
     system_basics,
 )
 from pyinfra_vyos._cli import sg_probe, sg_vbash_run
@@ -361,6 +362,78 @@ def test_interface_without_vbash_fails_closed_on_unknown_version() -> None:
 
     with pytest.raises(OperationValueError) as caught:
         prepare(interface, interface="dum0", interface_type="dummy")
+
+    message = str(caught.value)
+    assert "config" in message
+    assert "config_load" in message
+
+
+def test_static_route_prepare_renders_the_five_command_sequence(vbash_shim: Path) -> None:
+    """Fixture Configuration is {}; a new IPv4 next-hop plans as a set."""
+
+    state, meta = prepare(
+        static_route,
+        destination="203.0.113.0/24",
+        next_hops=["192.0.2.1"],
+    )
+    commands = operation_commands(state)
+
+    assert meta.will_change
+    assert len(commands) == 5
+    probe, mkdir, upload, chmod, run = commands
+    assert isinstance(probe, StringCommand)
+    assert probe.get_raw_value() == sg_probe().get_raw_value()
+    assert mkdir.get_raw_value().startswith("mkdir -m 700 ")
+    assert isinstance(upload, FileUploadCommand)
+    assert upload.dest.endswith("/session.sh")
+    assert isinstance(upload.src, StringIO)
+    script = upload.src.getvalue()
+    assert "set protocols static route 203.0.113.0/24 next-hop 192.0.2.1" in script
+    assert chmod.get_raw_value().startswith("chmod 600 ")
+    rendered = run.get_raw_value()
+    assert rendered == sg_vbash_run(upload.dest, upload.dest[: -len("/session.sh")]).get_raw_value()
+    assert vbash_shim.is_file()
+
+
+def test_static_route_v6_prepare_renders_route6(vbash_shim: Path) -> None:
+    """Fixture Configuration is {}; a new IPv6 next-hop plans as a route6 set."""
+
+    state, meta = prepare(
+        static_route,
+        destination="2001:db8::/64",
+        next_hops=["2001:db8::1"],
+    )
+    commands = operation_commands(state)
+
+    assert meta.will_change
+    assert len(commands) == 5
+    upload = commands[2]
+    assert isinstance(upload, FileUploadCommand)
+    assert isinstance(upload.src, StringIO)
+    assert "set protocols static route6 2001:db8::/64 next-hop 2001:db8::1" in upload.src.getvalue()
+    assert vbash_shim.is_file()
+
+
+def test_static_route_absent_on_empty_tree_noops(vbash_shim: Path) -> None:
+    """Fixture Configuration is {}; present=False of a missing node noops."""
+
+    _state, meta = prepare(static_route, destination="203.0.113.0/24", present=False)
+
+    assert not meta.will_change
+    assert vbash_shim.is_file()
+
+
+def test_static_route_empty_body_surfaces_as_operation_value_error(vbash_shim: Path) -> None:
+    with pytest.raises(OperationValueError):
+        prepare(static_route, destination="203.0.113.0/24")
+    assert vbash_shim.is_file()
+
+
+def test_static_route_without_vbash_fails_closed_on_unknown_version() -> None:
+    """@local has no vbash, so Version is default/empty and the gate fails closed."""
+
+    with pytest.raises(OperationValueError) as caught:
+        prepare(static_route, destination="203.0.113.0/24", next_hops=["192.0.2.1"])
 
     message = str(caught.value)
     assert "config" in message

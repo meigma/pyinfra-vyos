@@ -32,7 +32,9 @@ from pyinfra_vyos._render import (
     Exact,
     RenderError,
     Scope,
+    parse_route_destination,
     render_interface,
+    render_static_route,
     render_system_basics,
     require_absent_args_unset,
     schema_key,
@@ -47,7 +49,7 @@ from pyinfra_vyos._session import (
 from pyinfra_vyos._tree import TreeError, diff_tree, normalize_tree, select_subtree, validate_path
 from pyinfra_vyos.facts import Configuration, PendingSave, Version
 
-__all__ = ["config", "config_load", "config_save", "interface", "system_basics"]
+__all__ = ["config", "config_load", "config_save", "interface", "static_route", "system_basics"]
 
 _T = TypeVar("_T")
 
@@ -510,6 +512,80 @@ def interface(
     commands = _plan_scopes(host, scopes)
     if commands is None:
         host.noop(f"interface {interface_type} {interface} already matches")
+        return
+    staging = staging_dir()
+    yield from session_run_sequence(staging, build_commands_script(staging, commands, save=save))
+
+
+@operation()
+def static_route(
+    destination: str,
+    *,
+    next_hops: list[str] | dict[str, Any] | None = None,
+    values: dict[str, Any] | None = None,
+    present: bool = True,
+    save: bool = False,
+) -> Generator[StringCommand | FileUploadCommand, None, None]:
+    """Configure one VyOS static route (IPv4 or IPv6).
+
+    Address family is taken from ``destination``: IPv4 owns
+    ``protocols static route <destination>``; IPv6 owns
+    ``protocols static route6 <destination>``. The caller string is the path
+    token; the device is the canonicalization authority.
+
+    **TOTAL-body pruning**: this operation owns the whole route object.
+    Undeclared active next-hops are REMOVED. An omitted next-hop is
+    desired-absent, never unmanaged. :func:`config` with merge semantics is
+    the alternative for shared ownership of a route.
+
+    ``next_hops`` is a list of next-hop addresses (each becomes an empty
+    next-hop node) or a dict of address → per-hop subtree (distance and
+    similar attributes). Blackhole, reject, and interface routes ride in
+    ``values``. ``values`` is merged into the route body; a top-level
+    ``next-hop`` key collides with ``next_hops`` when both are provided.
+    ``present=True`` requires a nonempty body. ``present=False`` deletes the
+    route; ``next_hops`` and ``values`` must then be left unset.
+
+    **Lockout**: route changes take effect at commit and can sever SSH.
+    Commit is immediate; ``save=False`` limits reboot persistence only — it
+    is not a dry run and does not protect against lockout. The
+    verify-then-persist workflow is ``static_route(..., save=False)`` then
+    :func:`config_save`. Out-of-band recovery (console / OOB access) is
+    assumed if a change severs the controller session.
+
+    **Concurrency precondition**: the caller MUST serialize all mutation
+    sessions per host — at most one mutation session may run at a time,
+    including runs from the same controller (§2 / D4). Overlapping
+    mutation runs are out of contract.
+
+    **Save**: ``save=True`` persists only when this run commits (D13). An
+    empty controller delta noops regardless of ``save``. Save is
+    device-global; typed ownership does not scope persistence.
+
+    **Version gate**: the target's :class:`~pyinfra_vyos.facts.Version`
+    must map to a known 1.4 or 1.5 schema (D9). An unrecognized,
+    unqualified, or missing version fails closed with
+    :class:`~pyinfra.api.exceptions.OperationValueError`; use the
+    version-agnostic :func:`config` / :func:`config_load` on such hosts.
+    """
+
+    # Schema-independent checks. Must run before Version (phase-3 lesson).
+    _guarded(require_absent_args_unset, present, next_hops=next_hops, values=values)
+    _guarded(parse_route_destination, destination)
+
+    version_map = host.get_fact(Version) or {}
+    schema = _guarded(schema_key, version_map.get("version", ""))
+    scopes = _guarded(
+        render_static_route,
+        schema,
+        destination,
+        next_hops=next_hops,
+        values=values,
+        present=present,
+    )
+    commands = _plan_scopes(host, scopes)
+    if commands is None:
+        host.noop(f"static route {destination} already matches")
         return
     staging = staging_dir()
     yield from session_run_sequence(staging, build_commands_script(staging, commands, save=save))

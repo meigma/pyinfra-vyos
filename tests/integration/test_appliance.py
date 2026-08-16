@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import ipaddress
 import os
 import re
 import secrets
@@ -20,6 +22,7 @@ from pyinfra_vyos import (
     config_load,
     config_save,
     interface,
+    static_route,
     system_basics,
 )
 from pyinfra_vyos._cli import vyos_op_command
@@ -41,6 +44,12 @@ _DUMMY_ADDRESS = "192.0.2.65/32"
 _DUMMY_ADDRESSES_REPLACED = ("192.0.2.66/32", "192.0.2.67/32")
 _DUMMY_DESCRIPTION = "pyinfra phase3"
 _DUMMY_MTU = 1400
+_ROUTE_V4 = "192.0.2.0/24"
+_ROUTE_V4_HOPS = ("203.0.113.1", "203.0.113.2")
+_ROUTE_V4_DISTANCE = "50"
+_ROUTE_V6 = "2001:db8:0:1::/64"
+_ROUTE_V6_HOP = "2001:db8::1"
+_LOOPBACK_IFACE = "lo"
 _SYSTEM_OPEN_LINE = re.compile(r"(?m)^system\s*\{\n")
 _DEFAULT_CAPTURE_DIR = Path(__file__).resolve().parent / "_captures"
 
@@ -191,6 +200,109 @@ def _op_mode_dummy(inventory: Inventory, name: str = _DUMMY_IFACE) -> dict[str, 
     if isinstance(node, dict):
         return node
     raise AssertionError(f"unexpected dummy {name} node: {node!r}")
+
+
+def _instance_items(node: Any) -> list[tuple[str, Any]]:
+    """Return ``(key, value)`` pairs from a dict or list-of-single-key-dicts node."""
+
+    if node is None:
+        return []
+    if isinstance(node, dict):
+        return list(node.items())
+    if isinstance(node, list):
+        items: list[tuple[str, Any]] = []
+        for item in node:
+            if isinstance(item, dict):
+                items.extend(item.items())
+        return items
+    raise AssertionError(f"unexpected multi-instance node: {node!r}")
+
+
+def _route_family(destination: str) -> str:
+    network = ipaddress.ip_network(destination, strict=False)
+    return "route6" if network.version == 6 else "route"
+
+
+def _op_mode_route(inventory: Inventory, destination: str) -> tuple[str, dict[str, Any]] | None:
+    """Independent T2 read of one ``protocols static route[6]`` entry.
+
+    Matches the destination by prefix equality so IPv6 compression on the
+    device key still resolves. Returns ``(device_key, body)`` or ``None``.
+    """
+
+    network = ipaddress.ip_network(destination, strict=False)
+    family = "route6" if network.version == 6 else "route"
+    protocols = _op_mode_tree(inventory).get("protocols")
+    if not isinstance(protocols, dict):
+        return None
+    static = _instance_child(protocols, "static")
+    if static is None:
+        return None
+    routes = _instance_child(static, family)
+    for key, body in _instance_items(routes):
+        try:
+            echoed = ipaddress.ip_network(key, strict=False)
+        except ValueError:
+            continue
+        if echoed != network:
+            continue
+        if not isinstance(body, dict):
+            raise AssertionError(f"unexpected {family} {key} node: {body!r}")
+        return key, body
+    return None
+
+
+def _route_next_hops(node: dict[str, Any]) -> dict[str, Any]:
+    """Return the ``next-hop`` map under a static-route body."""
+
+    hops = _instance_child(node, "next-hop")
+    if hops is None:
+        return {}
+    return dict(_instance_items(hops))
+
+
+def _next_hop_addresses(node: dict[str, Any]) -> set[str]:
+    return set(_route_next_hops(node))
+
+
+def _hop_subtree(hops: dict[str, Any], address: str) -> dict[str, Any]:
+    """Return the body of one next-hop, matching the address by IP equality."""
+
+    want = ipaddress.ip_address(address)
+    for key, body in hops.items():
+        try:
+            matched = ipaddress.ip_address(key) == want
+        except ValueError:
+            continue
+        if matched:
+            return body if isinstance(body, dict) else {}
+    raise AssertionError(f"next-hop {address!r} missing from {set(hops)!r}")
+
+
+def _delete_static_route(inventory: Inventory, destination: str) -> None:
+    """Best-effort ``present=False``; absence and commit errors are tolerated."""
+
+    with contextlib.suppress(PyinfraError):
+        apply(
+            static_route,
+            inventory=inventory,
+            destination=destination,
+            present=False,
+            save=False,
+        )
+    found = _op_mode_route(inventory, destination)
+    if found is None:
+        return
+    key, _ = found
+    family = _route_family(destination)
+    with contextlib.suppress(PyinfraError):
+        apply(
+            config,
+            inventory=inventory,
+            path=["protocols", "static", family, key],
+            present=False,
+            save=False,
+        )
 
 
 def test_version_returns_a_version_key(inventory: Inventory) -> None:
@@ -689,3 +801,225 @@ def test_interface_dummy_full_cycle(inventory: Inventory) -> None:
             present=False,
             save=False,
         )
+
+
+def test_static_route_full_cycle(inventory: Inventory) -> None:
+    """static_route cycle (plan 4.3).
+
+    Documentation prefixes only — ``192.0.2.0/24`` (TEST-NET-1) via TEST-NET-3
+    next-hops ``203.0.113.1`` / ``203.0.113.2``, plus one ``2001:db8::/32``
+    documentation v6 probe. Next-hops are unreachable; that is fine, no real
+    traffic is sent, and default / management-path routes are never touched.
+
+    First apply creates two next-hops; independent ``show configuration json``
+    verifies both addresses under ``protocols static route 192.0.2.0/24``. A
+    second identical apply is a controller-side noop (T3). Dropping to one hop
+    proves whole-object Exact prunes the undeclared hop. Dict-form
+    ``next_hops`` then sets ``distance 50`` on the remaining hop.
+
+    The v6 probe records the device's echoed destination and next-hop
+    compression to ``phase4-route-canon.txt``. A second identical v6 apply is
+    recorded as noop-or-re-emit (canonicalization mismatch) without failing
+    either way; wrong state still fails.
+
+    ``present=False`` removes both routes; a second delete of each is a noop.
+    ``save=False`` throughout: commits touch only the active config, so boot
+    is untouched. Cleanup always deletes both destinations (already-absent is
+    tolerated).
+    """
+
+    destinations = (_ROUTE_V4, _ROUTE_V6)
+    two_hops: list[str] | dict[str, dict[str, str]] = list(_ROUTE_V4_HOPS)
+    one_hop: list[str] | dict[str, dict[str, str]] = [_ROUTE_V4_HOPS[0]]
+    distanced_hops: dict[str, dict[str, str]] = {
+        _ROUTE_V4_HOPS[0]: {"distance": _ROUTE_V4_DISTANCE}
+    }
+    v6_hops: list[str] | dict[str, dict[str, str]] = [_ROUTE_V6_HOP]
+
+    try:
+        try:
+            first = apply(
+                static_route,
+                inventory=inventory,
+                destination=_ROUTE_V4,
+                next_hops=two_hops,
+                save=False,
+            )
+        except OperationValueError:
+            raise
+        except PyinfraError as error:
+            artifact = _capture_dir() / "phase4-unreachable-nexthop.txt"
+            artifact.write_text(
+                "pyinfra-vyos phase4: commit rejected unreachable TEST-NET-3 "
+                "next-hops; adapting with an interface-scoped hop via per-hop "
+                f"values on loopback {_LOOPBACK_IFACE!r}.\n"
+                f"{type(error).__name__}: {error}\n"
+            )
+            print(f"pyinfra-vyos phase4 unreachable next-hop: {artifact}")
+            hop_iface = {"interface": _LOOPBACK_IFACE}
+            two_hops = {addr: dict(hop_iface) for addr in _ROUTE_V4_HOPS}
+            one_hop = {_ROUTE_V4_HOPS[0]: dict(hop_iface)}
+            distanced_hops = {
+                _ROUTE_V4_HOPS[0]: {
+                    "distance": _ROUTE_V4_DISTANCE,
+                    "interface": _LOOPBACK_IFACE,
+                }
+            }
+            v6_hops = {_ROUTE_V6_HOP: dict(hop_iface)}
+            first = apply(
+                static_route,
+                inventory=inventory,
+                destination=_ROUTE_V4,
+                next_hops=two_hops,
+                save=False,
+            )
+        assert first.did_change()
+        _assert_sentinel(first, SENTINEL_CHANGED)
+
+        created = _op_mode_route(inventory, _ROUTE_V4)
+        assert created is not None, f"static route {_ROUTE_V4} missing after create"
+        created_key, created_node = created
+        created_hops = _next_hop_addresses(created_node)
+        assert created_hops == set(_ROUTE_V4_HOPS), (
+            f"expected next-hops {set(_ROUTE_V4_HOPS)!r} under "
+            f"protocols static route {created_key}, got {created_hops!r}"
+        )
+
+        second = apply(
+            static_route,
+            inventory=inventory,
+            destination=_ROUTE_V4,
+            next_hops=two_hops,
+            save=False,
+        )
+        assert not second.did_change()
+
+        pruned = apply(
+            static_route,
+            inventory=inventory,
+            destination=_ROUTE_V4,
+            next_hops=one_hop,
+            save=False,
+        )
+        assert pruned.did_change()
+        _assert_sentinel(pruned, SENTINEL_CHANGED)
+        pruned_found = _op_mode_route(inventory, _ROUTE_V4)
+        assert pruned_found is not None
+        pruned_next = _next_hop_addresses(pruned_found[1])
+        assert pruned_next == {_ROUTE_V4_HOPS[0]}
+        assert _ROUTE_V4_HOPS[1] not in pruned_next
+
+        distanced = apply(
+            static_route,
+            inventory=inventory,
+            destination=_ROUTE_V4,
+            next_hops=distanced_hops,
+            save=False,
+        )
+        assert distanced.did_change()
+        _assert_sentinel(distanced, SENTINEL_CHANGED)
+        distanced_found = _op_mode_route(inventory, _ROUTE_V4)
+        assert distanced_found is not None
+        observed_hops = _route_next_hops(distanced_found[1])
+        assert {ipaddress.ip_address(addr) for addr in observed_hops} == {
+            ipaddress.ip_address(_ROUTE_V4_HOPS[0])
+        }
+        remaining_body = _hop_subtree(observed_hops, _ROUTE_V4_HOPS[0])
+        assert _leaf_scalar(remaining_body.get("distance")) == _ROUTE_V4_DISTANCE
+
+        v6_first = apply(
+            static_route,
+            inventory=inventory,
+            destination=_ROUTE_V6,
+            next_hops=v6_hops,
+            save=False,
+        )
+        assert v6_first.did_change()
+        _assert_sentinel(v6_first, SENTINEL_CHANGED)
+        v6_found = _op_mode_route(inventory, _ROUTE_V6)
+        assert v6_found is not None, f"static route {_ROUTE_V6} missing after create"
+        v6_key, v6_node = v6_found
+        v6_next = _route_next_hops(v6_node)
+        assert v6_next, f"no next-hop under route6 {v6_key}"
+        v6_hop_addrs = {ipaddress.ip_address(addr) for addr in v6_next}
+        assert v6_hop_addrs == {ipaddress.ip_address(_ROUTE_V6_HOP)}, (
+            f"expected next-hop {_ROUTE_V6_HOP!r} under route6 {v6_key}, got {set(v6_next)!r}"
+        )
+        assert ipaddress.ip_network(v6_key, strict=False) == ipaddress.ip_network(
+            _ROUTE_V6, strict=False
+        )
+
+        v6_second = apply(
+            static_route,
+            inventory=inventory,
+            destination=_ROUTE_V6,
+            next_hops=v6_hops,
+            save=False,
+        )
+        v6_after = _op_mode_route(inventory, _ROUTE_V6)
+        assert v6_after is not None, f"static route {_ROUTE_V6} missing after second apply"
+        after_key, after_node = v6_after
+        after_next = _route_next_hops(after_node)
+        after_addrs = {ipaddress.ip_address(addr) for addr in after_next}
+        assert after_addrs == {ipaddress.ip_address(_ROUTE_V6_HOP)}
+        assert ipaddress.ip_network(after_key, strict=False) == ipaddress.ip_network(
+            _ROUTE_V6, strict=False
+        )
+
+        artifact = _capture_dir() / "phase4-route-canon.txt"
+        artifact.write_text(
+            "pyinfra-vyos phase4 static-route canonicalization hotspot "
+            f"(v6 {_ROUTE_V6} via {_ROUTE_V6_HOP}):\n"
+            f"submitted destination: {_ROUTE_V6!r}\n"
+            f"device destination key: {v6_key!r}\n"
+            f"submitted next-hop: {_ROUTE_V6_HOP!r}\n"
+            f"device next-hop keys: {sorted(v6_next)!r}\n"
+            f"next-hop node: {v6_node.get('next-hop')!r}\n"
+            f"second identical apply did_change: {v6_second.did_change()!r}\n"
+        )
+        print(f"pyinfra-vyos phase4 route canon: {artifact}")
+
+        deleted_v4 = apply(
+            static_route,
+            inventory=inventory,
+            destination=_ROUTE_V4,
+            present=False,
+            save=False,
+        )
+        assert deleted_v4.did_change()
+        _assert_sentinel(deleted_v4, SENTINEL_CHANGED)
+        assert _op_mode_route(inventory, _ROUTE_V4) is None
+
+        deleted_v4_again = apply(
+            static_route,
+            inventory=inventory,
+            destination=_ROUTE_V4,
+            present=False,
+            save=False,
+        )
+        assert not deleted_v4_again.did_change()
+        assert _op_mode_route(inventory, _ROUTE_V4) is None
+
+        deleted_v6 = apply(
+            static_route,
+            inventory=inventory,
+            destination=v6_key,
+            present=False,
+            save=False,
+        )
+        assert deleted_v6.did_change()
+        _assert_sentinel(deleted_v6, SENTINEL_CHANGED)
+        assert _op_mode_route(inventory, _ROUTE_V6) is None
+
+        deleted_v6_again = apply(
+            static_route,
+            inventory=inventory,
+            destination=v6_key,
+            present=False,
+            save=False,
+        )
+        assert not deleted_v6_again.did_change()
+        assert _op_mode_route(inventory, _ROUTE_V6) is None
+    finally:
+        for destination in destinations:
+            _delete_static_route(inventory, destination)

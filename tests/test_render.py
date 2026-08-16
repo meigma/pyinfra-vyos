@@ -12,7 +12,9 @@ from pyinfra_vyos._render import (
     RenderError,
     Scope,
     coerce_token,
+    parse_route_destination,
     render_interface,
+    render_static_route,
     render_system_basics,
     require_absent_args_unset,
     schema_key,
@@ -577,3 +579,192 @@ def test_render_interface_all_none_is_bare_merge(schema: str) -> None:
     scopes = render_interface(schema, "eth0", "ethernet")
     assert_disjoint(scopes)
     assert scopes == [Scope(_interface_path("ethernet"), Merge({}))]
+
+
+# --- render_static_route -----------------------------------------------------
+
+
+def _static_route_path(destination: str, *, ipv6: bool = False) -> list[str]:
+    leaf = "route6" if ipv6 else "route"
+    return ["protocols", "static", leaf, destination]
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+def test_render_static_route_ipv4_dispatches_to_route(schema: str) -> None:
+    scopes = render_static_route(schema, "192.0.2.0/24", next_hops=["192.0.2.1"])
+    assert_disjoint(scopes)
+    assert len(scopes) == 1
+    assert scopes[0].path == _static_route_path("192.0.2.0/24")
+    assert scopes[0].intent == Exact({"next-hop": {"192.0.2.1": {}}})
+    assert scopes[0].sensitive is False
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+def test_render_static_route_ipv6_dispatches_to_route6(schema: str) -> None:
+    scopes = render_static_route(schema, "2001:db8::/64", next_hops=["2001:db8::1"])
+    assert_disjoint(scopes)
+    assert len(scopes) == 1
+    assert scopes[0].path == _static_route_path("2001:db8::/64", ipv6=True)
+    assert scopes[0].intent == Exact({"next-hop": {"2001:db8::1": {}}})
+
+
+def test_parse_route_destination_accepts_networks() -> None:
+    import ipaddress
+
+    assert parse_route_destination("192.0.2.0/24") == ipaddress.ip_network("192.0.2.0/24")
+    assert parse_route_destination("2001:db8::/64") == ipaddress.ip_network("2001:db8::/64")
+    # Bare host is /32; original caller string stays the path token in the renderer.
+    assert parse_route_destination("192.0.2.5") == ipaddress.ip_network("192.0.2.5/32")
+
+
+def test_parse_route_destination_rejects_host_bits_and_garbage() -> None:
+    with pytest.raises(RenderError) as caught:
+        parse_route_destination("192.0.2.1/24")
+    message = str(caught.value)
+    assert "192.0.2.1/24" in message
+    assert "192.0.2.0/24" in message
+
+    with pytest.raises(RenderError) as caught:
+        parse_route_destination("garbage")
+    assert "garbage" in str(caught.value)
+
+
+def test_render_static_route_host_bits_rejected() -> None:
+    with pytest.raises(RenderError) as caught:
+        render_static_route("1.4", "192.0.2.1/24")
+
+    message = str(caught.value)
+    assert "192.0.2.1/24" in message
+    assert "192.0.2.0/24" in message
+
+
+def test_render_static_route_garbage_destination_rejected() -> None:
+    with pytest.raises(RenderError) as caught:
+        render_static_route("1.4", "garbage")
+
+    assert "garbage" in str(caught.value)
+
+
+def test_render_static_route_bare_host_is_slash_32() -> None:
+    # ipaddress.ip_network("192.0.2.5") treats a bare host as /32. The path
+    # token is still the original caller string; the device canonicalizes.
+    scopes = render_static_route("1.4", "192.0.2.5", next_hops=["192.0.2.1"])
+    assert_disjoint(scopes)
+    assert len(scopes) == 1
+    assert scopes[0].path == _static_route_path("192.0.2.5")
+    assert isinstance(scopes[0].intent, Exact)
+
+
+def test_render_static_route_list_and_dict_next_hops_are_equivalent() -> None:
+    from_list = render_static_route("1.4", "192.0.2.0/24", next_hops=["192.0.2.1", "192.0.2.2"])
+    from_dict = render_static_route(
+        "1.4",
+        "192.0.2.0/24",
+        next_hops={"192.0.2.1": {}, "192.0.2.2": {}},
+    )
+    assert_disjoint(from_list)
+    assert_disjoint(from_dict)
+    assert from_list == from_dict
+    assert from_list[0].intent == Exact({"next-hop": {"192.0.2.1": {}, "192.0.2.2": {}}})
+
+
+def test_render_static_route_dict_preserves_per_hop_subtree() -> None:
+    scopes = render_static_route(
+        "1.4",
+        "192.0.2.0/24",
+        next_hops={"192.0.2.1": {"distance": "10"}},
+    )
+    assert_disjoint(scopes)
+    assert scopes[0].intent == Exact({"next-hop": {"192.0.2.1": {"distance": ["10"]}}})
+
+
+def test_render_static_route_rejects_next_hop_collision_naming_both() -> None:
+    with pytest.raises(RenderError) as caught:
+        render_static_route(
+            "1.4",
+            "192.0.2.0/24",
+            next_hops=["192.0.2.1"],
+            values={"next-hop": {"192.0.2.2": {}}},
+        )
+
+    message = str(caught.value)
+    assert "next-hop" in message
+    assert "next_hops" in message
+
+
+def test_render_static_route_values_only_next_hop_accepted() -> None:
+    scopes = render_static_route(
+        "1.4",
+        "192.0.2.0/24",
+        values={"next-hop": {"192.0.2.1": {}}},
+    )
+    assert_disjoint(scopes)
+    assert len(scopes) == 1
+    assert scopes[0].intent == Exact({"next-hop": {"192.0.2.1": {}}})
+
+
+def test_render_static_route_merges_next_hops_with_values() -> None:
+    scopes = render_static_route(
+        "1.4",
+        "192.0.2.0/24",
+        next_hops=["192.0.2.1"],
+        values={"blackhole": {}},
+    )
+    assert_disjoint(scopes)
+    assert scopes[0].intent == Exact({"next-hop": {"192.0.2.1": {}}, "blackhole": {}})
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {},
+        {"next_hops": [], "values": {}},
+    ],
+)
+def test_render_static_route_empty_body_rejected(kwargs: dict[str, object]) -> None:
+    with pytest.raises(RenderError) as caught:
+        render_static_route("1.4", "192.0.2.0/24", **kwargs)  # type: ignore[arg-type]
+
+    assert "bare route" in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"next_hops": ["192.0.2.1"]},
+        {"values": {"blackhole": {}}},
+    ],
+)
+def test_render_static_route_present_false_rejects_desired_args(
+    kwargs: dict[str, object],
+) -> None:
+    with pytest.raises(RenderError) as caught:
+        render_static_route("1.4", "192.0.2.0/24", present=False, **kwargs)  # type: ignore[arg-type]
+
+    name = next(iter(kwargs))
+    assert name in str(caught.value)
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+def test_render_static_route_present_false_alone_is_absent(schema: str) -> None:
+    scopes = render_static_route(schema, "192.0.2.0/24", present=False)
+    assert_disjoint(scopes)
+    assert scopes == [Scope(_static_route_path("192.0.2.0/24"), Absent())]
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+@pytest.mark.parametrize(
+    ("destination", "ipv6", "hop"),
+    [
+        ("192.0.2.0/24", False, "192.0.2.1"),
+        ("2001:db8::/64", True, "2001:db8::1"),
+    ],
+)
+def test_render_static_route_emits_r2_path_tokens(
+    schema: str, destination: str, ipv6: bool, hop: str
+) -> None:
+    scopes = render_static_route(schema, destination, next_hops=[hop])
+    assert_disjoint(scopes)
+    assert len(scopes) == 1
+    assert scopes[0].path == _static_route_path(destination, ipv6=ipv6)
+    assert isinstance(scopes[0].intent, Exact)

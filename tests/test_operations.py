@@ -25,6 +25,7 @@ from pyinfra_vyos.operations import (
     config_load,
     config_save,
     interface,
+    static_route,
     system_basics,
 )
 
@@ -144,6 +145,7 @@ def test_package_exports_the_public_primitives() -> None:
         "config_load",
         "config_save",
         "interface",
+        "static_route",
         "system_basics",
     ]
     for exported in pyinfra_vyos.__all__:
@@ -231,6 +233,47 @@ def test_interface_present_false_rejects_desired_args_before_any_host_access() -
                 addresses=["192.0.2.1/32"],
             )
         )
+
+
+def test_static_route_signature_is_positional_destination_then_keyword_only() -> None:
+    parameters = inspect.signature(static_route).parameters
+
+    assert list(parameters) == [
+        "destination",
+        "next_hops",
+        "values",
+        "present",
+        "save",
+    ]
+    assert parameters["destination"].kind is parameters["destination"].POSITIONAL_OR_KEYWORD
+    for name in ("next_hops", "values", "present", "save"):
+        assert parameters[name].kind is parameters[name].KEYWORD_ONLY
+    assert parameters["destination"].default is inspect.Parameter.empty
+    assert parameters["next_hops"].default is None
+    assert parameters["values"].default is None
+    assert parameters["present"].default is True
+    assert parameters["save"].default is False
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"destination": "203.0.113.0/24", "present": False, "next_hops": ["192.0.2.1"]},
+        {"destination": "garbage", "next_hops": ["192.0.2.1"]},
+        {"destination": "192.0.2.1/24", "next_hops": ["192.0.2.1"]},
+    ],
+)
+def test_static_route_schema_independent_rejections_surface_before_any_host_access(
+    kwargs: dict[str, Any],
+) -> None:
+    """Validation raises OperationValueError before host.get_fact is reached.
+
+    These run without pyinfra host context: reaching the fact lookup would
+    raise a context error instead, so passing proves validation comes first.
+    """
+
+    with pytest.raises(OperationValueError):
+        list(static_route._inner(**kwargs))
 
 
 def test_nonexistent_path_is_rejected(tmp_path: Path) -> None:

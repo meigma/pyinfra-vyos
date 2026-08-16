@@ -2,9 +2,10 @@
 
 Typed operations are renderers (A2, D6). This module holds the ``Scope``
 algebra, the helpers every renderer shares, and the per-op renderer
-functions themselves — :func:`render_system_basics` and
-:func:`render_interface` so far; later phases add their own. There is no
-I/O and no pyinfra state. Callers pass values in and get values out.
+functions themselves — :func:`render_system_basics`,
+:func:`render_interface`, and :func:`render_static_route` so far; later
+phases add their own. There is no I/O and no pyinfra state. Callers pass
+values in and get values out.
 
 Layer contract: a renderer maps a desired keyword model plus a schema key
 to ``list[Scope]``. ``operations.py`` feeds those scopes to the shared
@@ -23,6 +24,7 @@ the exception message.
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from dataclasses import dataclass
 
@@ -35,7 +37,9 @@ __all__ = [
     "RenderError",
     "Scope",
     "coerce_token",
+    "parse_route_destination",
     "render_interface",
+    "render_static_route",
     "render_system_basics",
     "require_absent_args_unset",
     "schema_key",
@@ -182,6 +186,15 @@ _INTERFACE_TYPED_KEYS: dict[str, str] = {
     "description": "description",
     "mtu": "mtu",
     "disable": "disabled",
+}
+
+# D9 seam: 1.4 and 1.5 emit the same R§2 modern-baseline static-route
+# paths (protocols static route / route6). Tables are keyed by schema
+# anyway so a later fork does not break this signature.
+_STATIC_ROUTE_LEAVES: dict[int, str] = {4: "route", 6: "route6"}
+_STATIC_ROUTE_PATHS: dict[str, dict[int, str]] = {
+    "1.4": _STATIC_ROUTE_LEAVES,
+    "1.5": _STATIC_ROUTE_LEAVES,
 }
 
 
@@ -357,3 +370,115 @@ def render_interface(
             raise RenderError(str(error)) from error
         scopes.append(Scope(path=path, intent=Merge(subtree=subtree)))
     return scopes
+
+
+def parse_route_destination(
+    destination: str,
+) -> ipaddress.IPv4Network | ipaddress.IPv6Network:
+    """Parse *destination* as a network; host bits and garbage are errors.
+
+    Schema-independent: callers may hoist this before the Version fact (A1).
+    ``render_static_route`` still owns authoritative AF dispatch.
+    """
+
+    # strict=True (the ipaddress default): reject prefixes with host bits set.
+    # Caller states intent exactly (plan 4.1 recommendation).
+    if not isinstance(destination, str):
+        raise RenderError("destination must be a string")
+    try:
+        return ipaddress.ip_network(destination, strict=True)
+    except ValueError as error:
+        try:
+            network = ipaddress.ip_network(destination, strict=False)
+        except ValueError:
+            raise RenderError(f"invalid destination {destination!r}") from error
+        raise RenderError(
+            f"destination {destination!r} has host bits set; use the network form {network!s}"
+        ) from error
+
+
+_static_route_network = parse_route_destination
+
+
+def _next_hops_wrapper(next_hops: object) -> dict[str, object]:
+    """Wrap typed ``next_hops`` as a ``next-hop`` mapping for normalize_tree."""
+
+    if isinstance(next_hops, list):
+        if not all(isinstance(addr, str) for addr in next_hops):
+            raise RenderError("next_hops must be a list of strings")
+        return {"next-hop": {addr: {} for addr in next_hops}}
+    if isinstance(next_hops, dict):
+        for subtree in next_hops.values():
+            if not isinstance(subtree, dict):
+                raise RenderError("next_hops mapping values must be dicts")
+        return {"next-hop": next_hops}
+    raise RenderError("next_hops must be a list of addresses or a mapping of address to subtree")
+
+
+def render_static_route(
+    schema: str,
+    destination: str,
+    *,
+    next_hops: list[str] | dict[str, dict[str, object]] | None = None,
+    values: dict[str, object] | None = None,
+    present: bool = True,
+) -> list[Scope]:
+    """Render one ``protocols static route[6] <dest>`` node as a single ``Scope``.
+
+    Address-family dispatch uses ``ipaddress.ip_network(destination)`` with
+    ``strict=True``: a prefix with host bits set is rejected so the caller
+    states intent exactly. The original caller string is the path token;
+    the device is the canonicalization authority.
+
+    ``next_hops`` as ``list[str]`` becomes ``{"next-hop": {addr: {}}}``;
+    as ``dict[str, dict]`` the per-hop subtrees are preserved. Addresses
+    are token-validated only (C2); next-hop interface forms ride in
+    ``values``. Integer per-hop attributes such as ``distance`` must be
+    strings — the merged body is normalized strict, not coerced.
+
+    Merged with ``values``. A top-level ``values["next-hop"]`` collides
+    with a provided ``next_hops`` argument; when ``next_hops`` is
+    ``None``, ``values`` may carry ``next-hop`` itself. ``present=True``
+    requires a nonempty body (nonempty ``next_hops`` or nonempty
+    ``values``); a bare route object is never commit-valid.
+    ``present=False`` is a single ``Absent`` at the route path; every
+    desired-state argument must be unset.
+    """
+
+    try:
+        table = _STATIC_ROUTE_PATHS[schema]
+    except KeyError as error:
+        raise RenderError(f"unknown schema {schema!r}") from error
+
+    require_absent_args_unset(present, next_hops=next_hops, values=values)
+
+    network = parse_route_destination(destination)
+    # Use the original caller string as the path token. Do not substitute
+    # the parsed/normalized form — the device is the canonicalization authority.
+    path = _validated_path(["protocols", "static", table[network.version], destination])
+
+    if not present:
+        return [Scope(path=path, intent=Absent())]
+
+    if not next_hops and not values:
+        raise RenderError(
+            "static_route requires a nonempty next_hops or values; "
+            "a bare route object is never commit-valid"
+        )
+
+    body: dict[str, Node] = {}
+    if next_hops:
+        try:
+            body.update(
+                normalize_tree(_next_hops_wrapper(next_hops), strict=True, _where="next_hops")
+            )
+        except TreeError as error:
+            raise RenderError(str(error)) from error
+    if values is not None:
+        if isinstance(values, dict) and "next-hop" in values and next_hops is not None:
+            raise RenderError("values key 'next-hop' collides with the typed next_hops argument")
+        try:
+            body.update(normalize_tree(values, strict=True, _where="values"))
+        except TreeError as error:
+            raise RenderError(str(error)) from error
+    return [Scope(path=path, intent=Exact(node=body))]
