@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 from pyinfra.api import FileUploadCommand, StringCommand
 from pyinfra.api.exceptions import OperationValueError
+from pyinfra.facts.server import User as ServerUser
 
 from pyinfra_vyos import (
     Configuration,
@@ -18,6 +19,7 @@ from pyinfra_vyos import (
     interface,
     static_route,
     system_basics,
+    user,
 )
 from pyinfra_vyos._cli import sg_probe, sg_vbash_run
 from pyinfra_vyos._session import SENTINEL_CHANGED
@@ -438,3 +440,120 @@ def test_static_route_without_vbash_fails_closed_on_unknown_version() -> None:
     message = str(caught.value)
     assert "config" in message
     assert "config_load" in message
+
+
+_SUPPRESSED_OUTPUT = "device output suppressed (sensitive command)"
+_USER_HASH = "$6$salt$hash"
+
+
+def _failure_branch(script: str, index: int) -> str:
+    marker = f"config command {index} ("
+    start = script.index(marker)
+    end = script.index("builtin exit 1", start)
+    return script[start:end]
+
+
+def test_user_prepare_renders_sensitive_password_and_plain_ssh_keys(vbash_shim: Path) -> None:
+    """Fixture Configuration is {}; a new user password+key plans as sets.
+
+    Ties phase-1 ``_session`` sensitive capture to a real producer end-to-end.
+    """
+
+    state, meta = prepare(
+        user,
+        user="pyinfra-test",
+        encrypted_password=_USER_HASH,
+        ssh_keys={"k1": {"type": "ssh-ed25519", "key": "AAAA"}},
+    )
+    commands = operation_commands(state)
+
+    assert meta.will_change
+    assert len(commands) == 5
+    probe, mkdir, upload, chmod, run = commands
+    assert isinstance(probe, StringCommand)
+    assert probe.get_raw_value() == sg_probe().get_raw_value()
+    assert mkdir.get_raw_value().startswith("mkdir -m 700 ")
+    assert isinstance(upload, FileUploadCommand)
+    assert upload.dest.endswith("/session.sh")
+    assert isinstance(upload.src, StringIO)
+    script = upload.src.getvalue()
+    assert "system login user pyinfra-test authentication encrypted-password" in script
+    assert "system login user pyinfra-test authentication public-keys" in script
+    assert chmod.get_raw_value().startswith("chmod 600 ")
+    rendered = run.get_raw_value()
+    assert rendered == sg_vbash_run(upload.dest, upload.dest[: -len("/session.sh")]).get_raw_value()
+
+    capture_lines = [line for line in script.splitlines() if line.startswith("_cmd_out=$(")]
+    hash_captures = [line for line in capture_lines if _USER_HASH in line]
+    assert hash_captures
+    assert all("2>&1" in line for line in hash_captures)
+    assert all("set " in line for line in hash_captures)
+
+    key_captures = [line for line in capture_lines if "public-keys" in line]
+    assert key_captures
+    assert all("2>&1" not in line for line in key_captures)
+
+    for line in script.splitlines():
+        if _USER_HASH not in line:
+            continue
+        assert line.startswith("_cmd_out=$(")
+        assert "printf" not in line
+
+    for index, line in enumerate(capture_lines, start=1):
+        if _USER_HASH not in line:
+            continue
+        branch = _failure_branch(script, index)
+        assert _SUPPRESSED_OUTPUT in branch
+        assert '"$_cmd_out"' not in branch
+        assert f"config command {index} (set) failed" in branch
+
+    assert vbash_shim.is_file()
+
+
+def test_user_present_false_refuses_self_deletion() -> None:
+    """The server.User fact reports the real test-runner username on @local."""
+
+    identity = fact_value(ServerUser)
+    assert isinstance(identity, str) and identity.strip()
+
+    with pytest.raises(OperationValueError, match="self-deletion") as caught:
+        prepare(user, user=identity.strip(), present=False)
+    message = str(caught.value)
+    assert "config" in message
+    assert identity.strip() in message
+
+
+def test_user_present_false_of_absent_user_noops(vbash_shim: Path) -> None:
+    """Guard passes for a different user; empty fixture config plans nothing."""
+
+    identity = fact_value(ServerUser)
+    target = "someone-else"
+    assert target != (identity.strip() if isinstance(identity, str) else identity)
+
+    _state, meta = prepare(user, user=target, present=False)
+
+    assert not meta.will_change
+    assert vbash_shim.is_file()
+
+
+def test_user_without_vbash_fails_closed_on_unknown_version() -> None:
+    """Guard is schema-independent; delete grammar is still Version-gated."""
+
+    with pytest.raises(OperationValueError) as caught:
+        prepare(user, user="someone-else", present=False)
+
+    message = str(caught.value)
+    assert "config" in message
+    assert "config_load" in message
+
+
+def test_user_plaintext_does_not_short_circuit_before_version() -> None:
+    """Hash-only rejection is renderer-layer and runs after Version."""
+
+    with pytest.raises(OperationValueError) as caught:
+        prepare(user, user="pyinfra-test", encrypted_password="plaintext")
+
+    message = str(caught.value)
+    assert "config_load" in message
+    assert "encrypted_password" not in message
+    assert "plaintext" not in message

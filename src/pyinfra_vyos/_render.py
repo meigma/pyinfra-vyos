@@ -3,9 +3,9 @@
 Typed operations are renderers (A2, D6). This module holds the ``Scope``
 algebra, the helpers every renderer shares, and the per-op renderer
 functions themselves — :func:`render_system_basics`,
-:func:`render_interface`, and :func:`render_static_route` so far; later
-phases add their own. There is no I/O and no pyinfra state. Callers pass
-values in and get values out.
+:func:`render_interface`, :func:`render_static_route`, and
+:func:`render_user` so far; later phases add their own. There is no I/O
+and no pyinfra state. Callers pass values in and get values out.
 
 Layer contract: a renderer maps a desired keyword model plus a schema key
 to ``list[Scope]``. ``operations.py`` feeds those scopes to the shared
@@ -41,6 +41,7 @@ __all__ = [
     "render_interface",
     "render_static_route",
     "render_system_basics",
+    "render_user",
     "require_absent_args_unset",
     "schema_key",
 ]
@@ -196,6 +197,25 @@ _STATIC_ROUTE_PATHS: dict[str, dict[int, str]] = {
     "1.4": _STATIC_ROUTE_LEAVES,
     "1.5": _STATIC_ROUTE_LEAVES,
 }
+
+# D9 seam: 1.4 and 1.5 emit the same R§2 modern-baseline system login
+# user leaves. Tables are keyed by schema anyway so a later fork does not
+# break this signature.
+_USER_LEAVES: dict[str, list[str]] = {
+    "full_name": ["full-name"],
+    "encrypted_password": ["authentication", "encrypted-password"],
+    "ssh_keys": ["authentication", "public-keys"],
+}
+_USER_PATHS: dict[str, dict[str, list[str]]] = {
+    "1.4": _USER_LEAVES,
+    "1.5": _USER_LEAVES,
+}
+
+_PASSWORD_LOCK_MARKERS = frozenset({"!", "*"})
+_ENCRYPTED_PASSWORD_FORM = (
+    "encrypted_password must be a $-prefixed crypt string or exactly the lock "
+    "markers ! or *; hash on the controller with mkpasswd or passlib"
+)
 
 
 def _validated_path(path: list[str]) -> list[str]:
@@ -490,3 +510,96 @@ def render_static_route(
         except TreeError as error:
             raise RenderError(str(error)) from error
     return [Scope(path=path, intent=Exact(node=body))]
+
+
+def _validated_encrypted_password(value: object) -> Node:
+    """Accept a crypt hash or lock marker without echoing the supplied value.
+
+    Form check runs before token rules (D11): ``_validated_leaf`` error
+    paths interpolate the value, so a rejected plaintext must never reach
+    them. A ``$``-prefixed string then passes C2 (leading-dash, not
+    leading-dollar).
+    """
+
+    if not isinstance(value, str) or not (value.startswith("$") or value in _PASSWORD_LOCK_MARKERS):
+        raise RenderError(_ENCRYPTED_PASSWORD_FORM)
+    return _validated_leaf(value, field="encrypted_password", where="encrypted_password")
+
+
+def render_user(
+    schema: str,
+    user: str,
+    *,
+    full_name: str | None = None,
+    encrypted_password: str | None = None,
+    ssh_keys: dict[str, dict[str, str]] | None = None,
+    present: bool = True,
+) -> list[Scope]:
+    """Render one ``system login user <name>`` node as disjoint ``Scope`` values.
+
+    Per-field ownership: ``None`` is unmanaged. ``encrypted_password`` is
+    hash-or-lock-marker only and the Exact scope it emits is the only
+    sensitive scope. ``ssh_keys`` is an exact public-key set; body keys
+    are open (D10). All typed args ``None`` ensures the user via
+    ``Merge({})``. ``present=False`` is a single ``Absent`` at the user
+    path; every desired-state argument must be unset. There is no
+    ``values`` pass-through.
+    """
+
+    try:
+        table = _USER_PATHS[schema]
+    except KeyError as error:
+        raise RenderError(f"unknown schema {schema!r}") from error
+
+    desired_args: dict[str, object] = {
+        "full_name": full_name,
+        "encrypted_password": encrypted_password,
+        "ssh_keys": ssh_keys,
+    }
+    require_absent_args_unset(present, **desired_args)
+
+    if not isinstance(user, str):
+        raise RenderError("user must be a string")
+    _validated_leaf(user, field="user", where="user")
+    path = _validated_path(["system", "login", "user", user])
+
+    if not present:
+        return [Scope(path=path, intent=Absent())]
+
+    if all(value is None for value in desired_args.values()):
+        return [Scope(path=path, intent=Merge({}))]
+
+    scopes: list[Scope] = []
+    if full_name is not None:
+        if not isinstance(full_name, str):
+            raise RenderError("full_name must be a string")
+        node = _validated_leaf(full_name, field="full_name", where="full_name")
+        scopes.append(
+            Scope(path=_validated_path([*path, *table["full_name"]]), intent=Exact(node=node))
+        )
+    if encrypted_password is not None:
+        node = _validated_encrypted_password(encrypted_password)
+        scopes.append(
+            Scope(
+                path=_validated_path([*path, *table["encrypted_password"]]),
+                intent=Exact(node=node),
+                sensitive=True,
+            )
+        )
+    if ssh_keys is not None:
+        if not isinstance(ssh_keys, dict):
+            raise RenderError("ssh_keys must be a mapping of key id to body")
+        for body in ssh_keys.values():
+            if not isinstance(body, dict):
+                raise RenderError("ssh_keys values must be mappings")
+        try:
+            subtree = normalize_tree(ssh_keys, strict=True, _where="ssh_keys")
+        except TreeError as error:
+            raise RenderError(str(error)) from error
+        scopes.append(
+            Scope(
+                path=_validated_path([*path, *table["ssh_keys"]]),
+                intent=Exact(node=subtree),
+            )
+        )
+    return scopes

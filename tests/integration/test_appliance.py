@@ -24,6 +24,7 @@ from pyinfra_vyos import (
     interface,
     static_route,
     system_basics,
+    user,
 )
 from pyinfra_vyos._cli import vyos_op_command
 from pyinfra_vyos._parse import OUTPUT_MARKER, parse_config_json, strip_marker
@@ -50,6 +51,23 @@ _ROUTE_V4_DISTANCE = "50"
 _ROUTE_V6 = "2001:0DB8:0000:0001:0000:0000:0000:0000/64"
 _ROUTE_V6_HOP = "2001:0DB8:0000:0000:0000:0000:0000:0001"
 _LOOPBACK_IFACE = "lo"
+_TEST_USER = "pyinfra-test"
+_CONNECTING_USER = "vyos"
+_TEST_FULL_NAME = "pyinfra phase5"
+_TEST_SSH_KEY_ID = "phase5@lab"
+_TEST_SSH_KEY_TYPE = "ssh-ed25519"
+# OpenSSH wire-format ed25519 blob (type prefix + 32-byte key).
+_TEST_SSH_KEY = "AAAAC3NzaC1lZDI1NTE5AAAAIE1H2cTUD/FoeMur8M6Roz/VI/+KE1p7d3SmKBv53/Wo"
+_TEST_SSH_KEYS = {_TEST_SSH_KEY_ID: {"type": _TEST_SSH_KEY_TYPE, "key": _TEST_SSH_KEY}}
+_TEST_PASSWORD_HASH = (
+    "$6$pyinfra5$"
+    "xh1D6pXeohRbJKsbqbS/maiR.WAB7eXU8t8BjL4YG50QMQplvQs0l5mx9XY3nHvTINjoHeLNHgsr0QlngUmMc/"
+)
+_TEST_PASSWORD_HASH_ROTATED = (
+    "$6$pyinfra5b$"
+    "oo3qYKoWAGgJqR5W.tz1zvbUUQoZwt2paoIWQxy33TwnNeB/HGSRd1a4FMUd5rA3yMygkppWi95x2H/8w.Jki1"
+)
+_SENSITIVE_SUPPRESSION = "device output suppressed (sensitive command)"
 _SYSTEM_OPEN_LINE = re.compile(r"(?m)^system\s*\{\n")
 _DEFAULT_CAPTURE_DIR = Path(__file__).resolve().parent / "_captures"
 
@@ -300,6 +318,50 @@ def _delete_static_route(inventory: Inventory, destination: str) -> None:
             config,
             inventory=inventory,
             path=["protocols", "static", family, key],
+            present=False,
+            save=False,
+        )
+
+
+def _op_mode_login_user(inventory: Inventory, name: str) -> dict[str, Any] | None:
+    """Independent T2 read of ``system login user <name>``, or ``None`` if absent."""
+
+    system = _op_mode_system(inventory)
+    login = system.get("login")
+    if not isinstance(login, dict):
+        return None
+    node = _instance_child(login.get("user"), name)
+    if node is None:
+        return None
+    if isinstance(node, dict):
+        return node
+    raise AssertionError(f"unexpected login user {name} node: {node!r}")
+
+
+def _delete_login_user(inventory: Inventory, name: str) -> None:
+    """Best-effort ``present=False``; absence and commit errors are tolerated.
+
+    Never called on the connecting user: the typed op's deletion guard would
+    refuse, and a ``config`` fallback would bypass that guard.
+    """
+
+    if name == _CONNECTING_USER:
+        raise AssertionError(f"cleanup must not touch connecting user {name!r}")
+    with contextlib.suppress(PyinfraError):
+        apply(
+            user,
+            inventory=inventory,
+            user=name,
+            present=False,
+            save=False,
+        )
+    if _op_mode_login_user(inventory, name) is None:
+        return
+    with contextlib.suppress(PyinfraError):
+        apply(
+            config,
+            inventory=inventory,
+            path=["system", "login", "user", name],
             present=False,
             save=False,
         )
@@ -1026,3 +1088,166 @@ def test_static_route_full_cycle(inventory: Inventory) -> None:
     finally:
         for destination in destinations:
             _delete_static_route(inventory, destination)
+
+
+def test_user_full_cycle_and_deletion_guard(inventory: Inventory) -> None:
+    """user cycle (plan 5.3) plus the connecting-user deletion guard.
+
+    Disposable ``pyinfra-test`` only — the connecting ``vyos`` user's config
+    is never mutated except by the guard probe, which must fail at planning
+    with the device untouched. First apply sets full-name, a sha512-crypt
+    hash, and one ed25519 public key; independent ``show configuration json``
+    verifies those leaves under ``system login user pyinfra-test``. The
+    encrypted-password leaf is asserted as a stable-text round-trip (device
+    echo equals the submitted hash). Public-key body whitespace/format is a
+    canonicalization hotspot: submitted vs device echo are written to
+    ``phase5-user-canon.txt``. The password hash is never written to that
+    capture — only ``hash_roundtrip_stable: True/False``.
+
+    A second identical apply is a controller-side noop (T3). Rotating to a
+    different ``$6$`` digest reports changed and the new hash is independently
+    confirmed. The sensitive-command suppression path is not triggered on a
+    successful rotate; correctness of suppression on failure is unit
+    territory.
+
+    Guard probe: ``present=False`` on the connecting ``vyos`` user is a
+    planning ``OperationValueError`` (self-deletion); a follow-up read
+    asserts ``vyos`` still exists with an unchanged authentication subtree.
+    ``present=False`` on ``pyinfra-test`` (connected as ``vyos``) removes it;
+    a second delete is a noop.
+
+    ``save=False`` throughout: commits touch only the active config, so boot
+    is untouched. Cleanup always deletes ``pyinfra-test`` (already-absent is
+    tolerated) and never targets ``vyos``.
+    """
+
+    try:
+        first = apply(
+            user,
+            inventory=inventory,
+            user=_TEST_USER,
+            full_name=_TEST_FULL_NAME,
+            encrypted_password=_TEST_PASSWORD_HASH,
+            ssh_keys=_TEST_SSH_KEYS,
+            save=False,
+        )
+        assert first.did_change()
+        _assert_sentinel(first, SENTINEL_CHANGED)
+
+        node = _op_mode_login_user(inventory, _TEST_USER)
+        assert node is not None, f"login user {_TEST_USER} missing after create"
+        assert _leaf_scalar(node.get("full-name")) == _TEST_FULL_NAME
+
+        auth = node.get("authentication")
+        assert isinstance(auth, dict), f"authentication missing under {_TEST_USER}: {node!r}"
+        observed_hash = _leaf_scalar(auth.get("encrypted-password"))
+        hash_roundtrip_stable = observed_hash == _TEST_PASSWORD_HASH
+
+        public_keys = auth.get("public-keys")
+        key_node = _instance_child(public_keys, _TEST_SSH_KEY_ID)
+        assert key_node is not None, (
+            f"public-keys {_TEST_SSH_KEY_ID!r} missing under {_TEST_USER}: {public_keys!r}"
+        )
+        assert isinstance(key_node, dict), f"unexpected public-key node: {key_node!r}"
+        observed_type = _leaf_scalar(key_node.get("type"))
+        observed_key = _leaf_scalar(key_node.get("key"))
+        assert observed_type == _TEST_SSH_KEY_TYPE
+
+        artifact = _capture_dir() / "phase5-user-canon.txt"
+        artifact.write_text(
+            "pyinfra-vyos phase5 user canonicalization hotspot "
+            f"(public-keys {_TEST_SSH_KEY_ID}):\n"
+            f"submitted type: {_TEST_SSH_KEY_TYPE!r}\n"
+            f"submitted key body: {_TEST_SSH_KEY!r}\n"
+            f"device public-keys node: {public_keys!r}\n"
+            f"device type: {observed_type!r}\n"
+            f"device key body: {observed_key!r}\n"
+            f"hash_roundtrip_stable: {hash_roundtrip_stable}\n"
+        )
+        capture_text = artifact.read_text()
+        assert "$6$" not in capture_text
+        assert _TEST_PASSWORD_HASH not in capture_text
+        assert _TEST_PASSWORD_HASH_ROTATED not in capture_text
+        print(f"pyinfra-vyos phase5 user canon: {artifact}")
+
+        assert hash_roundtrip_stable, (
+            "encrypted-password did not round-trip as stable text "
+            f"(submitted length {len(_TEST_PASSWORD_HASH)}, "
+            f"device length {len(observed_hash) if observed_hash is not None else 0})"
+        )
+
+        second = apply(
+            user,
+            inventory=inventory,
+            user=_TEST_USER,
+            full_name=_TEST_FULL_NAME,
+            encrypted_password=_TEST_PASSWORD_HASH,
+            ssh_keys=_TEST_SSH_KEYS,
+            save=False,
+        )
+        assert not second.did_change()
+
+        rotated = apply(
+            user,
+            inventory=inventory,
+            user=_TEST_USER,
+            encrypted_password=_TEST_PASSWORD_HASH_ROTATED,
+            save=False,
+        )
+        assert rotated.did_change()
+        _assert_sentinel(rotated, SENTINEL_CHANGED)
+        rotated_output = "\n".join(
+            part for part in (rotated.stdout, getattr(rotated, "stderr", None)) if part
+        )
+        assert _SENSITIVE_SUPPRESSION not in rotated_output
+        rotated_node = _op_mode_login_user(inventory, _TEST_USER)
+        assert rotated_node is not None
+        rotated_auth = rotated_node.get("authentication")
+        assert isinstance(rotated_auth, dict)
+        assert _leaf_scalar(rotated_auth.get("encrypted-password")) == _TEST_PASSWORD_HASH_ROTATED
+
+        vyos_before = _op_mode_login_user(inventory, _CONNECTING_USER)
+        assert vyos_before is not None, f"connecting user {_CONNECTING_USER} missing before guard"
+        vyos_auth_before = vyos_before.get("authentication")
+
+        with pytest.raises(
+            OperationValueError,
+            match=r"(?i)(self-delet|connected user|connecting user)",
+        ):
+            apply(
+                user,
+                inventory=inventory,
+                user=_CONNECTING_USER,
+                present=False,
+                save=False,
+            )
+
+        vyos_after = _op_mode_login_user(inventory, _CONNECTING_USER)
+        assert vyos_after is not None, f"connecting user {_CONNECTING_USER} missing after guard"
+        assert vyos_after.get("authentication") == vyos_auth_before
+
+        deleted = apply(
+            user,
+            inventory=inventory,
+            user=_TEST_USER,
+            present=False,
+            save=False,
+        )
+        assert deleted.did_change()
+        _assert_sentinel(deleted, SENTINEL_CHANGED)
+        assert _op_mode_login_user(inventory, _TEST_USER) is None
+
+        deleted_again = apply(
+            user,
+            inventory=inventory,
+            user=_TEST_USER,
+            present=False,
+            save=False,
+        )
+        assert not deleted_again.did_change()
+        assert _op_mode_login_user(inventory, _TEST_USER) is None
+    finally:
+        _delete_login_user(inventory, _TEST_USER)
+        assert _op_mode_login_user(inventory, _TEST_USER) is None, (
+            f"cleanup left login user {_TEST_USER} on the device"
+        )
