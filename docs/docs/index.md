@@ -46,8 +46,11 @@ Inventory is ordinary pyinfra SSH:
 hosts = [("vyos.example.net", {"ssh_user": "vyos"})]
 ```
 
-The four facts wrap op-mode commands. `config_load` uploads a
-controller-local file and runs one configure / load / commit session.
+All four facts require `vbash`. `Version`, `Configuration`, and
+`ConfigurationCommands` use script-template `run`; `PendingSave` uses a
+device-side `cli-shell-api` comparison probe reduced to a byte count.
+`config_load` uploads a controller-local file and runs one configure /
+load / commit session.
 
 ```python
 # facts.py
@@ -67,8 +70,10 @@ pyinfra inventory.py facts.py
 ```
 
 `Configuration` and unredacted `ConfigurationCommands` are secret-bearing.
-`strip_private=True` is a VyOS op-pipe redaction; that output is not
-restore-faithful and must not be used as a backup.
+When `strip_private=True`, the command pipes op-mode output through the
+target's `/usr/libexec/vyos/strip-private.py` filter as a real shell
+pipeline. The interactive VyOS `| strip-private` op pipe is not used.
+That output is not restore-faithful and must not be used as a backup.
 
 ### Commit, verify, then persist
 
@@ -157,10 +162,11 @@ These contracts apply to the public operations and facts:
    a file with `// vyos-config-version`, as found in `/config/config.boot` or
    `save <file>` output. The library does not detect or inject the footer.
 4. **Distinguish controller and device idempotency.** `config_load` is
-   `is_idempotent=False`, so pyinfra reports it changed whenever it runs. The
-   other configuration operations diff against `Configuration` and call
-   `host.noop` for an empty delta. When a delta is sent, the device's
-   `sessionChanged` sentinel remains authoritative.
+   `is_idempotent=False`, so pyinfra reports it changed whenever it runs.
+   `config` and the six typed operations diff against `Configuration` and
+   call `host.noop` for an empty delta. `config_save` reads `PendingSave`,
+   noops on `False`, and fails closed on `None`. When a delta is sent, the
+   device's `sessionChanged` sentinel remains authoritative.
 5. **Treat save as device-global persistence.** A command script saves only
    when that script committed. An empty controller delta cannot be used to
    persist earlier active changes. Use `config_save()` as the explicit persist
@@ -173,7 +179,9 @@ These contracts apply to the public operations and facts:
 
 ## Fact reference
 
-All four facts run through `vbash` and script-template `run`.
+All four facts require `vbash`. `Version`, `Configuration`, and
+`ConfigurationCommands` use script-template `run`; `PendingSave` uses a
+device-side `cli-shell-api` comparison probe reduced to a byte count.
 `requires_command` returns `"vbash"` as a binary-presence gate only. Hosts
 without `vbash` yield `default()` instead of failing. The gate does not
 establish that the host is a VyOS appliance or that op-mode commands are
@@ -193,10 +201,11 @@ compatible.
 - **`Configuration`** — the active configuration as the raw JSON tree. No key
   or value normalization. Secret-bearing.
 - **`ConfigurationCommands`** — device-rendered set-form lines, with nonempty
-  lines kept as-is. When `strip_private` is true, the VyOS op-pipe tokens `\|`
-  and `strip-private` are appended as ordinary argv. This is a VyOS op pipe,
-  not a shell pipeline. Unredacted output is secret-bearing. Redacted output is
-  not restore-faithful and must not be used as a backup.
+  lines kept as-is. When `strip_private=True`, the command pipes op-mode
+  output through the target's `/usr/libexec/vyos/strip-private.py` filter as
+  a real shell pipeline. The interactive VyOS `| strip-private` op pipe is
+  not used. Unredacted output is secret-bearing. Redacted output is not
+  restore-faithful and must not be used as a backup.
 - **`PendingSave`** — `True` means the active configuration differs from the
   boot configuration, `False` means the comparison ran and found no
   difference, and `None` means the comparison could not run or could not be
@@ -225,10 +234,13 @@ pyinfra.
 ### Ownership models
 
 Per-field operations own only the fields whose arguments are not `None`.
-Omitted per-field arguments remain unmanaged. An empty collection is not an
-omission: it owns the field and makes that field empty. `system_basics`,
-`interface`, and `user` use this model. `firewall_ruleset` uses it for chain
-leaves and for the set of rule numbers when `replace_rules=False`.
+Omitted per-field arguments remain unmanaged. `system_basics`,
+`interface`, and `user` use this model: an empty collection is not an
+omission, it owns the field and makes that field empty.
+`firewall_ruleset` uses the per-field model for chain leaves.
+Empty-collection behavior is operation-specific. For `firewall_ruleset`,
+`rules={}` is rejected when `replace_rules=False`; with
+`replace_rules=True`, it prunes every rule.
 
 Whole-object operations treat a declared body as total. The controller prunes
 undeclared active state at every depth. For a `static_route`, this includes
@@ -247,7 +259,7 @@ instead of creating overlapping ownership.
 
 ### Version gate
 
-The seven typed configuration operations resolve a `1.4` or `1.5` schema key
+The six typed configuration operations resolve a `1.4` or `1.5` schema key
 from the `Version` fact. An unrecognized, unqualified, or missing version fails
 closed before configuration planning. `config` and `config_load` are
 version-agnostic escape hatches; `config_save` consumes `PendingSave` and does
@@ -276,6 +288,24 @@ persist an earlier active change. Use this workflow instead:
 fails closed on `None`, and performs an idempotent device-side recheck and save
 on `True`. Saving is device-global: it writes the whole active configuration,
 including unrelated unsaved changes.
+
+### `config_load`
+
+```python
+config_load(src: str | IO[Any], *, save: bool = False)
+```
+
+Loads a controller-local whole configuration. `src` is a path string or a
+readable, seekable file-like object. A string is resolved against the deploy
+directory with the same rule `files.put` uses. Callers should supply a
+footer-bearing config (`// vyos-config-version`); the library does not
+detect or inject the footer.
+
+`config_load` always yields commands and never controller-noops. pyinfra
+reports it changed whenever it runs; read the device `PYINFRA_VYOS`
+sentinels for the device result. When `save=True`, the load script's save
+block is not gated on this run's commit, so a save-only load still writes
+`/config/config.boot`.
 
 ### `config`
 
@@ -395,8 +425,9 @@ Rule numbers are coerced to strings; duplicate numbers across integer and
 string keys, such as `10` and `"10"`, are rejected.
 
 `replace_rules=True` requires `rules` and makes the complete `rule` node total.
-Only under that flag does `rules={}` prune every rule; `None` rule entries are
-rejected. `values` merges other chain keys. `default-action`, `description`,
+`rules={}` is rejected when `replace_rules=False`; with `replace_rules=True`,
+it prunes every rule. `None` rule entries are rejected under that flag.
+`values` merges other chain keys. `default-action`, `description`,
 and `rule` collide with typed arguments and are rejected in `values`. An
 owns-nothing call is rejected. `present=False` deletes the chain and requires
 all desired arguments to be unset and `replace_rules=False`.
@@ -412,8 +443,8 @@ all desired arguments to be unset and `replace_rules=False`.
   package does not implement commit-confirm.
 - **Device canonicalization.** The controller compares submitted text with the
   `Configuration` fact. If the device stores a different form, the controller
-  re-emits the delta on each run while the device `sessionChanged` gate
-  truthfully reports `noop`. Use the device-stored form to restore
+  re-emits the delta on each run while the `sessionChanged` gate reports
+  `noop`. Use the device-stored form to restore
   controller-side noops.
 - **VyOS 2026.03 lab observations.** These forms were observed on the lab
   appliance and are not cross-version guarantees:

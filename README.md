@@ -69,8 +69,10 @@ pyinfra inventory.py facts.py
 ```
 
 `Configuration` and unredacted `ConfigurationCommands` are secret-bearing.
-`strip_private=True` is a VyOS op-pipe redaction; that output is not
-restore-faithful and must not be used as a backup.
+When `strip_private=True`, the command pipes op-mode output through the
+target's `/usr/libexec/vyos/strip-private.py` filter as a real shell
+pipeline. The interactive VyOS `| strip-private` op pipe is not used.
+That output is not restore-faithful and must not be used as a backup.
 
 ### Commit, verify, then persist
 
@@ -121,9 +123,10 @@ version 0 and runs the full migration chain.
 
 ### Typed field management
 
-Typed operations own only the fields supplied by the caller. This deploy owns
-the hostname on `system_basics`, then the addresses and description on `dum0`.
-Omitted DNS, timezone, MTU, and disabled-state arguments remain unmanaged.
+Per-field typed operations own only the fields supplied by the caller. In
+this example, `system_basics` owns only `hostname`, and `interface` owns
+only `addresses` and `description`. Omitted DNS, timezone, MTU, and
+disabled-state arguments remain unmanaged.
 
 ```python
 # deploy_typed.py
@@ -173,12 +176,12 @@ values are `set` (merge). With `replace=True` the subtree becomes exactly
 owned `path` carefully: a broad path with `replace=True` can remove
 management access. `present=False` deletes the whole path.
 
-The desired subtree is diffed against the active tree on the controller;
-an empty delta noops without touching the device, so pyinfra's change
-reporting is honest for this operation. Applied deltas are staged in one
-configure session and committed once behind the same `sessionChanged` gate
-as `config_load`. Every path token, key, and value must be a nonempty
-string that does not begin with `-`. Multi-value ordering is not managed.
+The desired subtree is diffed against the active tree on the controller.
+An empty delta calls `host.noop` without touching the device. Applied
+deltas are staged in one configure session and committed once behind
+the same `sessionChanged` gate as `config_load`. Every path token, key,
+and value must be a nonempty string that does not begin with `-`.
+Multi-value ordering is not managed.
 
 ## Operations
 
@@ -251,7 +254,8 @@ These are user-facing, not internals:
    against `Configuration` on the controller and call `host.noop` for an
    empty delta. When they send a delta, the device's `sessionChanged` gate
    remains authoritative; supply device-canonical values if canonicalization
-   otherwise causes the controller to resend a truthful device noop.
+   otherwise causes the controller to resend a delta that the device reports
+   `PYINFRA_VYOS noop`.
 
 If a yielded command fails before the session runs — upload, chmod, the
 remote non-whitespace guard — or the connector drops, the 0600/0700

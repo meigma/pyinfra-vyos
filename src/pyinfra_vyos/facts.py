@@ -1,9 +1,11 @@
-"""VyOS facts collected by running op-mode commands on each host.
+"""VyOS facts collected through each host's pyinfra connector.
 
-Every fact runs a VyOS op-mode command through the host's pyinfra connector
-— ``@local``, SSH, or any other — via :func:`vyos_op_command`, and parses
-what it prints. Targets need the ``vbash`` binary; no Python and no package
-install on the appliance.
+``Version``, ``Configuration``, and ``ConfigurationCommands`` run op-mode
+commands via :func:`vyos_op_command`. ``PendingSave`` runs the
+active-versus-boot comparison via :func:`pending_save_probe`. Facts run
+through the host's pyinfra connector — ``@local``, SSH, or any other —
+and parse what they print. Targets need the ``vbash`` binary; no Python
+and no package install on the appliance.
 
 :meth:`~pyinfra.api.facts.FactBase.requires_command` is a binary-presence
 gate only. Hosts without ``vbash`` yield :meth:`~pyinfra.api.facts.FactBase.default`
