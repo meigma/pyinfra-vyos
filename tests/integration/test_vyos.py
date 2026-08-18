@@ -16,6 +16,7 @@ from pyinfra_vyos import (
     config,
     config_load,
     config_save,
+    firewall_group,
     interface,
     static_route,
     system_basics,
@@ -557,3 +558,75 @@ def test_user_plaintext_does_not_short_circuit_before_version() -> None:
     assert "config_load" in message
     assert "encrypted_password" not in message
     assert "plaintext" not in message
+
+
+def test_firewall_group_prepare_renders_the_five_command_sequence(vbash_shim: Path) -> None:
+    """Fixture Configuration is {}; a new address-group member plans as a set."""
+
+    state, meta = prepare(
+        firewall_group,
+        group="pyfw",
+        group_type="address",
+        members=["192.0.2.10"],
+    )
+    commands = operation_commands(state)
+
+    assert meta.will_change
+    assert len(commands) == 5
+    probe, mkdir, upload, chmod, run = commands
+    assert isinstance(probe, StringCommand)
+    assert probe.get_raw_value() == sg_probe().get_raw_value()
+    assert mkdir.get_raw_value().startswith("mkdir -m 700 ")
+    assert isinstance(upload, FileUploadCommand)
+    assert upload.dest.endswith("/session.sh")
+    assert isinstance(upload.src, StringIO)
+    script = upload.src.getvalue()
+    assert "set firewall group address-group pyfw address 192.0.2.10" in script
+    assert chmod.get_raw_value().startswith("chmod 600 ")
+    rendered = run.get_raw_value()
+    assert rendered == sg_vbash_run(upload.dest, upload.dest[: -len("/session.sh")]).get_raw_value()
+    assert vbash_shim.is_file()
+
+
+def test_firewall_group_port_int_coercion(vbash_shim: Path) -> None:
+    """Fixture Configuration is {}; an int port member is coerced in the script."""
+
+    state, meta = prepare(
+        firewall_group,
+        group="pyfw",
+        group_type="port",
+        members=[8080],
+    )
+    upload = operation_commands(state)[2]
+
+    assert meta.will_change
+    assert isinstance(upload, FileUploadCommand)
+    assert isinstance(upload.src, StringIO)
+    assert "set firewall group port-group pyfw port 8080" in upload.src.getvalue()
+    assert vbash_shim.is_file()
+
+
+def test_firewall_group_absent_on_empty_tree_noops(vbash_shim: Path) -> None:
+    """Fixture Configuration is {}; present=False of a missing node noops."""
+
+    _state, meta = prepare(firewall_group, group="pyfw", group_type="address", present=False)
+
+    assert not meta.will_change
+    assert vbash_shim.is_file()
+
+
+def test_firewall_group_unknown_type_surfaces_as_operation_value_error(vbash_shim: Path) -> None:
+    with pytest.raises(OperationValueError):
+        prepare(firewall_group, group="pyfw", group_type="bogus", members=["192.0.2.10"])
+    assert vbash_shim.is_file()
+
+
+def test_firewall_group_without_vbash_fails_closed_on_unknown_version() -> None:
+    """@local has no vbash, so Version is default/empty and the gate fails closed."""
+
+    with pytest.raises(OperationValueError) as caught:
+        prepare(firewall_group, group="pyfw", group_type="address", members=["192.0.2.10"])
+
+    message = str(caught.value)
+    assert "config" in message
+    assert "config_load" in message

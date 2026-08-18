@@ -12,6 +12,7 @@ import pytest
 from pyinfra.api import Inventory, StringCommand
 from pyinfra.api.exceptions import OperationValueError, PyinfraError
 from pyinfra.api.operation import OperationMeta
+from pyinfra.api.operations import run_ops
 
 from pyinfra_vyos import (
     Configuration,
@@ -21,6 +22,7 @@ from pyinfra_vyos import (
     config,
     config_load,
     config_save,
+    firewall_group,
     interface,
     static_route,
     system_basics,
@@ -30,7 +32,7 @@ from pyinfra_vyos._cli import vyos_op_command
 from pyinfra_vyos._parse import OUTPUT_MARKER, parse_config_json, strip_marker
 from pyinfra_vyos._session import SENTINEL_CHANGED, SENTINEL_NOOP
 
-from ._helpers import appliance_inventory, apply, fact_value, new_state
+from ._helpers import appliance_inventory, apply, fact_value, new_state, prepare
 
 pytestmark = pytest.mark.appliance
 
@@ -59,6 +61,15 @@ _TEST_SSH_KEY_TYPE = "ssh-ed25519"
 # OpenSSH wire-format ed25519 blob (type prefix + 32-byte key).
 _TEST_SSH_KEY = "AAAAC3NzaC1lZDI1NTE5AAAAIE1H2cTUD/FoeMur8M6Roz/VI/+KE1p7d3SmKBv53/Wo"
 _TEST_SSH_KEYS = {_TEST_SSH_KEY_ID: {"type": _TEST_SSH_KEY_TYPE, "key": _TEST_SSH_KEY}}
+_GROUP_HOSTS = "pyinfra-p6-hosts"
+_GROUP_PORTS = "pyinfra-p6-ports"
+_GROUP_REF = "pyinfra-p6-ref"
+_GROUP_DESCRIPTION = "pyinfra phase6"
+_GROUP_MEMBERS = ("192.0.2.10", "192.0.2.11")
+_GROUP_MEMBERS_REPLACED = ("192.0.2.11", "192.0.2.12")
+_PORT_MEMBERS: tuple[int | str, ...] = (8080, "8000-9000")
+_RULESET_NAME = "PYINFRA-P6"
+_RULESET_PATH = ["firewall", "ipv4", "name", _RULESET_NAME]
 _TEST_PASSWORD_HASH = (
     "$6$pyinfra5$"
     "xh1D6pXeohRbJKsbqbS/maiR.WAB7eXU8t8BjL4YG50QMQplvQs0l5mx9XY3nHvTINjoHeLNHgsr0QlngUmMc/"
@@ -362,6 +373,83 @@ def _delete_login_user(inventory: Inventory, name: str) -> None:
             config,
             inventory=inventory,
             path=["system", "login", "user", name],
+            present=False,
+            save=False,
+        )
+
+
+def _group_type_node_name(group_type: str) -> str:
+    """Map ``address`` / ``port`` / … to the ``<type>-group`` JSON node name."""
+
+    return f"{group_type}-group"
+
+
+def _op_mode_firewall_group(
+    inventory: Inventory, group_type: str, name: str
+) -> dict[str, Any] | None:
+    """Independent T2 read of ``firewall group <type>-group <name>``, or ``None``."""
+
+    firewall = _op_mode_tree(inventory).get("firewall")
+    if not isinstance(firewall, dict):
+        return None
+    groups = _instance_child(firewall, "group")
+    typed = _instance_child(groups, _group_type_node_name(group_type))
+    node = _instance_child(typed, name)
+    if node is None:
+        return None
+    if isinstance(node, dict):
+        return node
+    raise AssertionError(f"unexpected {group_type}-group {name} node: {node!r}")
+
+
+def _op_mode_named_ruleset(inventory: Inventory, name: str) -> dict[str, Any] | None:
+    """Independent T2 read of ``firewall ipv4 name <name>``, or ``None``."""
+
+    firewall = _op_mode_tree(inventory).get("firewall")
+    if not isinstance(firewall, dict):
+        return None
+    ipv4 = _instance_child(firewall, "ipv4")
+    names = _instance_child(ipv4, "name")
+    node = _instance_child(names, name)
+    if node is None:
+        return None
+    if isinstance(node, dict):
+        return node
+    raise AssertionError(f"unexpected named ruleset {name} node: {node!r}")
+
+
+def _delete_firewall_group(inventory: Inventory, group_type: str, name: str) -> None:
+    """Best-effort ``present=False``; absence and commit errors are tolerated."""
+
+    with contextlib.suppress(PyinfraError):
+        apply(
+            firewall_group,
+            inventory=inventory,
+            group=name,
+            group_type=group_type,
+            present=False,
+            save=False,
+        )
+    if _op_mode_firewall_group(inventory, group_type, name) is None:
+        return
+    with contextlib.suppress(PyinfraError):
+        apply(
+            config,
+            inventory=inventory,
+            path=["firewall", "group", _group_type_node_name(group_type), name],
+            present=False,
+            save=False,
+        )
+
+
+def _delete_named_ruleset(inventory: Inventory, name: str) -> None:
+    """Best-effort ``config(present=False)`` for a scratch named ruleset."""
+
+    with contextlib.suppress(PyinfraError):
+        apply(
+            config,
+            inventory=inventory,
+            path=["firewall", "ipv4", "name", name],
             present=False,
             save=False,
         )
@@ -1256,4 +1344,281 @@ def test_user_full_cycle_and_deletion_guard(inventory: Inventory) -> None:
         _delete_login_user(inventory, _TEST_USER)
         assert _op_mode_login_user(inventory, _TEST_USER) is None, (
             f"cleanup left login user {_TEST_USER} on the device"
+        )
+
+
+def test_firewall_group_full_cycle(inventory: Inventory) -> None:
+    """firewall_group cycle (plan 6.3).
+
+    Scratch names only — ``pyinfra-p6-hosts`` (address-group) and
+    ``pyinfra-p6-ports`` (port-group). First apply creates the address-group
+    with two TEST-NET-2 members and a description; independent
+    ``show configuration json`` verifies those leaves under ``firewall group
+    address-group pyinfra-p6-hosts``. A second identical apply is a
+    controller-side noop (T3). Replacing the member set prunes
+    ``192.0.2.10`` and adds ``192.0.2.12``. ``description=None`` then prunes
+    the description (whole-object total body).
+
+    The port-group probe creates ``pyinfra-p6-ports`` with mixed int/range
+    members and records the device's echoed port-range form to
+    ``phase6-group-canon.txt`` (canonicalization hotspot). Both groups are
+    deleted; a second delete of each is a noop.
+
+    ``save=False`` throughout: commits touch only the active config, so boot
+    is untouched. Cleanup always deletes both groups (already-absent is
+    tolerated).
+    """
+
+    try:
+        first = apply(
+            firewall_group,
+            inventory=inventory,
+            group=_GROUP_HOSTS,
+            group_type="address",
+            members=list(_GROUP_MEMBERS),
+            description=_GROUP_DESCRIPTION,
+            save=False,
+        )
+        assert first.did_change()
+        _assert_sentinel(first, SENTINEL_CHANGED)
+
+        node = _op_mode_firewall_group(inventory, "address", _GROUP_HOSTS)
+        assert node is not None, f"address-group {_GROUP_HOSTS} missing after create"
+        observed_members = _leaf_values(node.get("address"))
+        assert observed_members is not None
+        assert set(observed_members) == set(_GROUP_MEMBERS)
+        assert _leaf_scalar(node.get("description")) == _GROUP_DESCRIPTION
+
+        second = apply(
+            firewall_group,
+            inventory=inventory,
+            group=_GROUP_HOSTS,
+            group_type="address",
+            members=list(_GROUP_MEMBERS),
+            description=_GROUP_DESCRIPTION,
+            save=False,
+        )
+        assert not second.did_change()
+
+        replaced = apply(
+            firewall_group,
+            inventory=inventory,
+            group=_GROUP_HOSTS,
+            group_type="address",
+            members=list(_GROUP_MEMBERS_REPLACED),
+            description=_GROUP_DESCRIPTION,
+            save=False,
+        )
+        assert replaced.did_change()
+        _assert_sentinel(replaced, SENTINEL_CHANGED)
+        replaced_node = _op_mode_firewall_group(inventory, "address", _GROUP_HOSTS)
+        assert replaced_node is not None
+        replaced_members = _leaf_values(replaced_node.get("address"))
+        assert replaced_members is not None
+        assert set(replaced_members) == set(_GROUP_MEMBERS_REPLACED)
+        assert "192.0.2.10" not in replaced_members
+        assert "192.0.2.12" in replaced_members
+        assert _leaf_scalar(replaced_node.get("description")) == _GROUP_DESCRIPTION
+
+        dropped = apply(
+            firewall_group,
+            inventory=inventory,
+            group=_GROUP_HOSTS,
+            group_type="address",
+            members=list(_GROUP_MEMBERS_REPLACED),
+            description=None,
+            save=False,
+        )
+        assert dropped.did_change()
+        _assert_sentinel(dropped, SENTINEL_CHANGED)
+        dropped_node = _op_mode_firewall_group(inventory, "address", _GROUP_HOSTS)
+        assert dropped_node is not None, (
+            f"address-group {_GROUP_HOSTS} missing after description prune"
+        )
+        assert "description" not in dropped_node
+        dropped_members = _leaf_values(dropped_node.get("address"))
+        assert dropped_members is not None
+        assert set(dropped_members) == set(_GROUP_MEMBERS_REPLACED)
+
+        ports = apply(
+            firewall_group,
+            inventory=inventory,
+            group=_GROUP_PORTS,
+            group_type="port",
+            members=list(_PORT_MEMBERS),
+            save=False,
+        )
+        assert ports.did_change()
+        _assert_sentinel(ports, SENTINEL_CHANGED)
+        port_node = _op_mode_firewall_group(inventory, "port", _GROUP_PORTS)
+        assert port_node is not None, f"port-group {_GROUP_PORTS} missing after create"
+        observed_ports = _leaf_values(port_node.get("port"))
+        assert observed_ports is not None
+        assert "8080" in observed_ports
+
+        artifact = _capture_dir() / "phase6-group-canon.txt"
+        artifact.write_text(
+            "pyinfra-vyos phase6 group canonicalization hotspot "
+            f"(port-group {_GROUP_PORTS}):\n"
+            f"submitted members: {list(_PORT_MEMBERS)!r}\n"
+            f"device port node: {port_node.get('port')!r}\n"
+            f"device port list: {observed_ports!r}\n"
+        )
+        print(f"pyinfra-vyos phase6 group canon: {artifact}")
+
+        ports_again = apply(
+            firewall_group,
+            inventory=inventory,
+            group=_GROUP_PORTS,
+            group_type="port",
+            members=list(_PORT_MEMBERS),
+            save=False,
+        )
+        assert not ports_again.did_change(), (
+            f"port-group re-apply not idempotent; device echoed {observed_ports!r} "
+            f"for submitted {list(_PORT_MEMBERS)!r}"
+        )
+
+        deleted_hosts = apply(
+            firewall_group,
+            inventory=inventory,
+            group=_GROUP_HOSTS,
+            group_type="address",
+            present=False,
+            save=False,
+        )
+        assert deleted_hosts.did_change()
+        _assert_sentinel(deleted_hosts, SENTINEL_CHANGED)
+        assert _op_mode_firewall_group(inventory, "address", _GROUP_HOSTS) is None
+
+        deleted_ports = apply(
+            firewall_group,
+            inventory=inventory,
+            group=_GROUP_PORTS,
+            group_type="port",
+            present=False,
+            save=False,
+        )
+        assert deleted_ports.did_change()
+        _assert_sentinel(deleted_ports, SENTINEL_CHANGED)
+        assert _op_mode_firewall_group(inventory, "port", _GROUP_PORTS) is None
+
+        deleted_hosts_again = apply(
+            firewall_group,
+            inventory=inventory,
+            group=_GROUP_HOSTS,
+            group_type="address",
+            present=False,
+            save=False,
+        )
+        assert not deleted_hosts_again.did_change()
+        assert _op_mode_firewall_group(inventory, "address", _GROUP_HOSTS) is None
+
+        deleted_ports_again = apply(
+            firewall_group,
+            inventory=inventory,
+            group=_GROUP_PORTS,
+            group_type="port",
+            present=False,
+            save=False,
+        )
+        assert not deleted_ports_again.did_change()
+        assert _op_mode_firewall_group(inventory, "port", _GROUP_PORTS) is None
+    finally:
+        _delete_firewall_group(inventory, "address", _GROUP_HOSTS)
+        _delete_firewall_group(inventory, "port", _GROUP_PORTS)
+        assert _op_mode_firewall_group(inventory, "address", _GROUP_HOSTS) is None, (
+            f"cleanup left address-group {_GROUP_HOSTS} on the device"
+        )
+        assert _op_mode_firewall_group(inventory, "port", _GROUP_PORTS) is None, (
+            f"cleanup left port-group {_GROUP_PORTS} on the device"
+        )
+
+
+def test_firewall_group_referenced_delete_fails_at_commit(inventory: Inventory) -> None:
+    """Referenced-group delete fails at device commit (plan 6.3, D12).
+
+    Create address-group ``pyinfra-p6-ref`` and reference it from scratch
+    named ruleset ``PYINFRA-P6`` via the generic ``config`` op. Deleting the
+    group while referenced must fail at device commit; commit output is the
+    diagnostic (D12) — the surfaced error is non-empty and mentions the group
+    or commit, without pinning exact device wording.
+
+    The group remains present after the refused commit. Phase 1's Q2 probe
+    observed that a rejected commit on this lab release (VyOS 2026.03) left
+    no partial active state (fully absent / atomic); this scenario reuses
+    that data point: the delete does not take effect.
+
+    Cleanup deletes the ruleset first, then the group, and tolerates absence.
+    """
+
+    try:
+        created = apply(
+            firewall_group,
+            inventory=inventory,
+            group=_GROUP_REF,
+            group_type="address",
+            members=["192.0.2.10"],
+            save=False,
+        )
+        assert created.did_change()
+        _assert_sentinel(created, SENTINEL_CHANGED)
+        assert _op_mode_firewall_group(inventory, "address", _GROUP_REF) is not None
+
+        referenced = apply(
+            config,
+            inventory=inventory,
+            path=_RULESET_PATH,
+            values={
+                "default-action": "accept",
+                "rule": {
+                    "10": {
+                        "action": "drop",
+                        "source": {"group": {"address-group": _GROUP_REF}},
+                    }
+                },
+            },
+            save=False,
+        )
+        assert referenced.did_change()
+        _assert_sentinel(referenced, SENTINEL_CHANGED)
+        assert _op_mode_named_ruleset(inventory, _RULESET_NAME) is not None
+
+        # Split apply so the completed meta still exposes commit stderr (D12).
+        state, meta = prepare(
+            firewall_group,
+            inventory=inventory,
+            group=_GROUP_REF,
+            group_type="address",
+            present=False,
+            save=False,
+        )
+        with pytest.raises(PyinfraError) as caught:
+            run_ops(state)
+        error = caught.value
+        pieces = [str(error), *map(str, error.args)]
+        if meta.is_complete():
+            pieces.extend([meta.stdout, meta.stderr])
+        diagnostic = "\n".join(part for part in pieces if part).strip()
+        assert diagnostic, "expected non-empty commit diagnostic on referenced-group delete"
+        assert re.search(r"(?i)(pyinfra-p6-ref|commit)", diagnostic), (
+            f"expected group name or commit in diagnostic, got {diagnostic!r}"
+        )
+
+        still = _op_mode_firewall_group(inventory, "address", _GROUP_REF)
+        assert still is not None, (
+            f"address-group {_GROUP_REF} missing after rejected delete "
+            "(Q2: refused commit is atomic on this lab release)"
+        )
+        still_members = _leaf_values(still.get("address"))
+        assert still_members is not None
+        assert "192.0.2.10" in still_members
+    finally:
+        _delete_named_ruleset(inventory, _RULESET_NAME)
+        _delete_firewall_group(inventory, "address", _GROUP_REF)
+        assert _op_mode_named_ruleset(inventory, _RULESET_NAME) is None, (
+            f"cleanup left named ruleset {_RULESET_NAME} on the device"
+        )
+        assert _op_mode_firewall_group(inventory, "address", _GROUP_REF) is None, (
+            f"cleanup left address-group {_GROUP_REF} on the device"
         )

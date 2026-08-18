@@ -13,6 +13,7 @@ from pyinfra_vyos._render import (
     Scope,
     coerce_token,
     parse_route_destination,
+    render_firewall_group,
     render_interface,
     render_static_route,
     render_system_basics,
@@ -1021,3 +1022,160 @@ def test_render_user_emits_r2_path_tokens(schema: str) -> None:
         ["system", "login", "user", "alice", "authentication", "encrypted-password"],
         ["system", "login", "user", "alice", "authentication", "public-keys"],
     ]
+
+
+# --- render_firewall_group ---------------------------------------------------
+
+
+# Emitted-grammar fixture: group_type -> (path segment, member-leaf name).
+# Pinned from the VyOS 1.5 firewall-group member leaves (plan 6.1/6.3).
+_FIREWALL_GROUP_TYPES = (
+    ("address", "address-group", "address"),
+    ("ipv6-address", "ipv6-address-group", "address"),
+    ("network", "network-group", "network"),
+    ("ipv6-network", "ipv6-network-group", "network"),
+    ("port", "port-group", "port"),
+    ("interface", "interface-group", "interface"),
+    ("mac", "mac-group", "mac-address"),
+    ("domain", "domain-group", "address"),
+)
+_FIREWALL_GROUP_TYPE_NAMES = tuple(group_type for group_type, _, _ in _FIREWALL_GROUP_TYPES)
+
+
+def _firewall_group_path(segment: str, name: str = "g1") -> list[str]:
+    return ["firewall", "group", segment, name]
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+@pytest.mark.parametrize(("group_type", "segment", "member_leaf"), _FIREWALL_GROUP_TYPES)
+def test_render_firewall_group_emits_r2_path_and_member_leaf(
+    schema: str, group_type: str, segment: str, member_leaf: str
+) -> None:
+    scopes = render_firewall_group(schema, "g1", group_type, members=["m1"])
+    assert_disjoint(scopes)
+    assert len(scopes) == 1
+    assert scopes[0].path == _firewall_group_path(segment)
+    assert scopes[0].intent == Exact({member_leaf: ["m1"]})
+    assert scopes[0].sensitive is False
+
+
+def test_render_firewall_group_members_none_rejected_when_present() -> None:
+    with pytest.raises(RenderError) as caught:
+        render_firewall_group("1.4", "g1", "address")
+
+    assert "members" in str(caught.value)
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+def test_render_firewall_group_empty_members_accepted(schema: str) -> None:
+    scopes = render_firewall_group(schema, "g1", "address", members=[])
+    assert_disjoint(scopes)
+    assert len(scopes) == 1
+    assert scopes[0].path == _firewall_group_path("address-group")
+    assert scopes[0].intent == Exact({})
+    assert scopes[0].sensitive is False
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+@pytest.mark.parametrize(
+    ("members", "description", "body"),
+    [
+        ([], None, {}),
+        ([], "x", {"description": ["x"]}),
+        (["192.0.2.1"], None, {"address": ["192.0.2.1"]}),
+    ],
+)
+def test_render_firewall_group_own_and_empty_matrix(
+    schema: str,
+    members: list[str],
+    description: str | None,
+    body: dict[str, list[str]],
+) -> None:
+    scopes = render_firewall_group(
+        schema, "g1", "address", members=members, description=description
+    )
+    assert_disjoint(scopes)
+    assert len(scopes) == 1
+    assert scopes[0].path == _firewall_group_path("address-group")
+    assert scopes[0].intent == Exact(body)
+    assert isinstance(scopes[0].intent, Exact)
+    if members:
+        assert "address" in scopes[0].intent.node
+    else:
+        assert "address" not in scopes[0].intent.node
+    if description is None:
+        assert "description" not in scopes[0].intent.node
+    assert scopes[0].sensitive is False
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+def test_render_firewall_group_port_members_are_coerced_to_strings(schema: str) -> None:
+    scopes = render_firewall_group(schema, "g1", "port", members=[8080, "8000-9000", "https"])
+    assert_disjoint(scopes)
+    assert len(scopes) == 1
+    assert scopes[0].path == _firewall_group_path("port-group")
+    assert scopes[0].intent == Exact({"port": ["8080", "8000-9000", "https"]})
+    assert scopes[0].sensitive is False
+
+
+@pytest.mark.parametrize("member", [True, False, None, {}, [], 1.5, b"80"])
+def test_render_firewall_group_rejects_non_token_member_uniformly(member: object) -> None:
+    """Every non-str/int element reports the same error as a non-list members."""
+
+    with pytest.raises(RenderError) as caught:
+        render_firewall_group("1.4", "g1", "port", members=[member])  # type: ignore[list-item]
+
+    assert str(caught.value) == "members must be a list of strings or ints"
+
+
+@pytest.mark.parametrize("members", ["192.0.2.1", ("192.0.2.1",), 8080])
+def test_render_firewall_group_rejects_non_list_members(members: object) -> None:
+    """The list-level rejection already uses the wording elements now share."""
+
+    with pytest.raises(RenderError) as caught:
+        render_firewall_group("1.4", "g1", "address", members=members)  # type: ignore[arg-type]
+
+    assert str(caught.value) == "members must be a list of strings or ints"
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"members": ["192.0.2.1"]},
+        {"description": "x"},
+    ],
+)
+def test_render_firewall_group_present_false_rejects_desired_args(
+    kwargs: dict[str, object],
+) -> None:
+    with pytest.raises(RenderError) as caught:
+        render_firewall_group("1.4", "g1", "address", present=False, **kwargs)  # type: ignore[arg-type]
+
+    name = next(iter(kwargs))
+    assert name in str(caught.value)
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+def test_render_firewall_group_present_false_alone_is_absent(schema: str) -> None:
+    scopes = render_firewall_group(schema, "g1", "address", present=False)
+    assert_disjoint(scopes)
+    assert scopes == [Scope(_firewall_group_path("address-group"), Absent())]
+    assert scopes[0].sensitive is False
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+def test_render_firewall_group_unknown_type_names_allowed_types(schema: str) -> None:
+    with pytest.raises(RenderError) as caught:
+        render_firewall_group(schema, "g1", "bogus", members=["m1"])
+
+    message = str(caught.value)
+    assert "bogus" in message
+    for allowed in _FIREWALL_GROUP_TYPE_NAMES:
+        assert allowed in message
+
+
+def test_render_firewall_group_unknown_schema_rejected() -> None:
+    with pytest.raises(RenderError) as caught:
+        render_firewall_group("9.9", "g1", "address", members=["m1"])
+
+    assert "9.9" in str(caught.value)

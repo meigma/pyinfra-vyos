@@ -34,11 +34,13 @@ from pyinfra_vyos._render import (
     RenderError,
     Scope,
     parse_route_destination,
+    render_firewall_group,
     render_interface,
     render_static_route,
     render_system_basics,
     render_user,
     require_absent_args_unset,
+    require_firewall_group_members,
     schema_key,
 )
 from pyinfra_vyos._session import (
@@ -55,6 +57,7 @@ __all__ = [
     "config",
     "config_load",
     "config_save",
+    "firewall_group",
     "interface",
     "static_route",
     "system_basics",
@@ -726,6 +729,86 @@ def user(
     commands = _plan_scopes(host, scopes)
     if commands is None:
         host.noop(f"user {user} already matches")
+        return
+    staging = staging_dir()
+    yield from session_run_sequence(staging, build_commands_script(staging, commands, save=save))
+
+
+@operation()
+def firewall_group(
+    group: str,
+    group_type: str,
+    *,
+    members: list[str | int] | None = None,
+    description: str | None = None,
+    present: bool = True,
+    save: bool = False,
+) -> Generator[StringCommand | FileUploadCommand, None, None]:
+    """Configure one VyOS static firewall group.
+
+    **TOTAL-body pruning**: this operation owns the whole group object.
+    Undeclared members are REMOVED, and so is an undeclared description:
+    ``description=None`` (the default) means desired-absent, never unmanaged.
+    ``members=[]`` owns the group and empties it; a group node with no members
+    remains a valid empty group. An omitted member is desired-absent.
+    :func:`config` with merge semantics is the alternative for shared
+    ownership of a group.
+
+    ``members`` is required when ``present=True`` (``[]`` is allowed).
+    ``group_type`` is one of ``address``, ``ipv6-address``, ``network``,
+    ``ipv6-network``, ``port``, ``interface``, ``mac``, or ``domain``;
+    each maps to ``firewall group <type>-group <group>`` and that type's
+    member leaf. Port members accept ints (coerced to strings) as well as
+    range/name strings. ``present=False`` deletes the group; ``members``
+    and ``description`` must then be left unset.
+
+    **Static groups only**: dynamic and remote groups are out of scope —
+    use :func:`config` as the escape hatch.
+
+    **Referenced groups**: deleting a group that a ruleset still references
+    fails at device commit. Commit output is the diagnostic (D12). Cross-op
+    ordering is the caller's obligation; this operation does not inspect
+    referrers.
+
+    **Concurrency precondition**: the caller MUST serialize all mutation
+    sessions per host — at most one mutation session may run at a time,
+    including runs from the same controller (§2 / D4). Overlapping
+    mutation runs are out of contract.
+
+    **Save**: ``save=True`` persists only when this run commits (D13). An
+    empty controller delta noops regardless of ``save``. Save is
+    device-global; typed ownership does not scope persistence.
+
+    **Version gate**: the target's :class:`~pyinfra_vyos.facts.Version`
+    must map to a known 1.4 or 1.5 schema (D9). An unrecognized,
+    unqualified, or missing version fails closed with
+    :class:`~pyinfra.api.exceptions.OperationValueError`; use the
+    version-agnostic :func:`config` / :func:`config_load` on such hosts.
+    """
+
+    # Schema-independent checks. Must run before Version (phase-3 lesson).
+    _guarded(
+        require_absent_args_unset,
+        present,
+        members=members,
+        description=description,
+    )
+    _guarded(require_firewall_group_members, present, members)
+
+    version_map = host.get_fact(Version) or {}
+    schema = _guarded(schema_key, version_map.get("version", ""))
+    scopes = _guarded(
+        render_firewall_group,
+        schema,
+        group,
+        group_type,
+        members=members,
+        description=description,
+        present=present,
+    )
+    commands = _plan_scopes(host, scopes)
+    if commands is None:
+        host.noop(f"firewall group {group_type} {group} already matches")
         return
     staging = staging_dir()
     yield from session_run_sequence(staging, build_commands_script(staging, commands, save=save))
