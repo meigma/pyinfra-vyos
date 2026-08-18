@@ -23,6 +23,7 @@ from pyinfra_vyos import (
     config_load,
     config_save,
     firewall_group,
+    firewall_ruleset,
     interface,
     static_route,
     system_basics,
@@ -70,6 +71,21 @@ _GROUP_MEMBERS_REPLACED = ("192.0.2.11", "192.0.2.12")
 _PORT_MEMBERS: tuple[int | str, ...] = (8080, "8000-9000")
 _RULESET_NAME = "PYINFRA-P6"
 _RULESET_PATH = ["firewall", "ipv4", "name", _RULESET_NAME]
+_P7_CHAIN_NAME = "PYINFRA_P7"
+_P7_CHAIN = ["name", _P7_CHAIN_NAME]
+_P7_DESCRIPTION = "pyinfra phase7"
+_P7_DEFAULT_ACTION = "accept"
+_P7_RULES: dict[int, dict[str, Any]] = {
+    10: {
+        "action": "accept",
+        "protocol": "tcp",
+        "destination": {"port": "8080"},
+    },
+    20: {
+        "action": "drop",
+        "protocol": "udp",
+    },
+}
 _TEST_PASSWORD_HASH = (
     "$6$pyinfra5$"
     "xh1D6pXeohRbJKsbqbS/maiR.WAB7eXU8t8BjL4YG50QMQplvQs0l5mx9XY3nHvTINjoHeLNHgsr0QlngUmMc/"
@@ -416,6 +432,41 @@ def _op_mode_named_ruleset(inventory: Inventory, name: str) -> dict[str, Any] | 
     if isinstance(node, dict):
         return node
     raise AssertionError(f"unexpected named ruleset {name} node: {node!r}")
+
+
+def _ruleset_rules(node: dict[str, Any] | None) -> dict[str, Any]:
+    """Return the ``rule`` map under a named chain, keyed as the device echoed them."""
+
+    if node is None:
+        return {}
+    return dict(_instance_items(node.get("rule")))
+
+
+def _rule_body(rules: dict[str, Any], number: int | str) -> Any:
+    """Return one rule body, matching the number as string or int."""
+
+    wanted = str(number)
+    for key, body in rules.items():
+        if str(key) == wanted:
+            return body
+    return None
+
+
+def _delete_p7_ruleset(inventory: Inventory) -> None:
+    """Best-effort ``present=False`` for the phase-7 scratch named chain."""
+
+    with contextlib.suppress(PyinfraError):
+        apply(
+            firewall_ruleset,
+            inventory=inventory,
+            af="ipv4",
+            chain=list(_P7_CHAIN),
+            present=False,
+            save=False,
+        )
+    if _op_mode_named_ruleset(inventory, _P7_CHAIN_NAME) is None:
+        return
+    _delete_named_ruleset(inventory, _P7_CHAIN_NAME)
 
 
 def _delete_firewall_group(inventory: Inventory, group_type: str, name: str) -> None:
@@ -1621,4 +1672,198 @@ def test_firewall_group_referenced_delete_fails_at_commit(inventory: Inventory) 
         )
         assert _op_mode_firewall_group(inventory, "address", _GROUP_REF) is None, (
             f"cleanup left address-group {_GROUP_REF} on the device"
+        )
+
+
+def test_firewall_ruleset_custom_chain_full_cycle(inventory: Inventory) -> None:
+    """firewall_ruleset cycle (plan 7.3) on a custom named chain only.
+
+    Scratch chain ``["name", "PYINFRA_P7"]`` — never a base chain, so there
+    is no lockout risk. ``replace_rules=True`` is used only on this chain,
+    and only to prune every rule after the per-rule steps.
+
+    First apply creates the chain with ``default_action=accept``, a
+    description, and two whole-rule bodies. Independent
+    ``show configuration json`` verifies those leaves. Device echo of
+    rule-number keys, action case, and protocol/port forms is written to
+    ``phase7-ruleset-canon.txt``. A second identical apply is a
+    controller-side noop (T3) — the canonicalization assertion.
+
+    Re-applying rule 10 without its destination port (rule 20 unlisted)
+    proves per-rule totality and that unlisted rules stay unmanaged.
+    ``rules={20: None}`` deletes only rule 20. ``replace_rules=True``
+    with ``rules={}`` prunes the ``rule`` node while leaving the chain.
+    ``present=False`` removes the chain; a second delete is a noop.
+
+    ``save=False`` throughout: commits touch only the active config, so boot
+    is untouched. Cleanup always deletes ``PYINFRA_P7`` (already-absent is
+    tolerated).
+    """
+
+    try:
+        first = apply(
+            firewall_ruleset,
+            inventory=inventory,
+            af="ipv4",
+            chain=list(_P7_CHAIN),
+            default_action=_P7_DEFAULT_ACTION,
+            description=_P7_DESCRIPTION,
+            rules=dict(_P7_RULES),
+            save=False,
+        )
+        assert first.did_change()
+        _assert_sentinel(first, SENTINEL_CHANGED)
+
+        node = _op_mode_named_ruleset(inventory, _P7_CHAIN_NAME)
+        assert node is not None, f"named chain {_P7_CHAIN_NAME} missing after create"
+        assert _leaf_scalar(node.get("default-action")) == _P7_DEFAULT_ACTION
+        assert _leaf_scalar(node.get("description")) == _P7_DESCRIPTION
+
+        rules = _ruleset_rules(node)
+        rule10 = _rule_body(rules, 10)
+        rule20 = _rule_body(rules, 20)
+        assert rule10 is not None, f"rule 10 missing after create; keys={list(rules)!r}"
+        assert rule20 is not None, f"rule 20 missing after create; keys={list(rules)!r}"
+        assert isinstance(rule10, dict)
+        assert isinstance(rule20, dict)
+        assert _leaf_scalar(rule10.get("action")) == "accept"
+        assert _leaf_scalar(rule10.get("protocol")) == "tcp"
+        dest = _instance_child(rule10, "destination")
+        assert dest is not None, f"rule 10 destination missing: {rule10!r}"
+        assert _leaf_scalar(_instance_child(dest, "port")) == "8080"
+        assert _leaf_scalar(rule20.get("action")) == "drop"
+        assert _leaf_scalar(rule20.get("protocol")) == "udp"
+
+        artifact = _capture_dir() / "phase7-ruleset-canon.txt"
+        artifact.write_text(
+            "pyinfra-vyos phase7 ruleset canonicalization hotspot "
+            f"(named chain {_P7_CHAIN_NAME}):\n"
+            f"submitted rule keys: {list(_P7_RULES)!r} "
+            f"types: {[type(key).__name__ for key in _P7_RULES]!r}\n"
+            f"device rule keys: {list(rules)!r} "
+            f"types: {[type(key).__name__ for key in rules]!r}\n"
+            f"submitted rule 10: {_P7_RULES[10]!r}\n"
+            f"device rule 10: {rule10!r}\n"
+            f"submitted rule 20: {_P7_RULES[20]!r}\n"
+            f"device rule 20: {rule20!r}\n"
+            f"submitted action/protocol/port: accept/tcp/8080 drop/udp\n"
+            f"device action/protocol/port: "
+            f"{_leaf_scalar(rule10.get('action'))!r}/"
+            f"{_leaf_scalar(rule10.get('protocol'))!r}/"
+            f"{_leaf_scalar(_instance_child(dest, 'port'))!r} "
+            f"{_leaf_scalar(rule20.get('action'))!r}/"
+            f"{_leaf_scalar(rule20.get('protocol'))!r}\n"
+        )
+        print(f"pyinfra-vyos phase7 ruleset canon: {artifact}")
+
+        second = apply(
+            firewall_ruleset,
+            inventory=inventory,
+            af="ipv4",
+            chain=list(_P7_CHAIN),
+            default_action=_P7_DEFAULT_ACTION,
+            description=_P7_DESCRIPTION,
+            rules=dict(_P7_RULES),
+            save=False,
+        )
+        assert not second.did_change(), (
+            f"ruleset re-apply not idempotent; submitted={_P7_RULES!r} "
+            f"device keys={list(rules)!r} rule10={rule10!r} rule20={rule20!r}"
+        )
+
+        replaced = apply(
+            firewall_ruleset,
+            inventory=inventory,
+            af="ipv4",
+            chain=list(_P7_CHAIN),
+            rules={10: {"action": "accept", "protocol": "tcp"}},
+            save=False,
+        )
+        assert replaced.did_change()
+        _assert_sentinel(replaced, SENTINEL_CHANGED)
+        replaced_node = _op_mode_named_ruleset(inventory, _P7_CHAIN_NAME)
+        assert replaced_node is not None
+        replaced_rules = _ruleset_rules(replaced_node)
+        replaced_10 = _rule_body(replaced_rules, 10)
+        replaced_20 = _rule_body(replaced_rules, 20)
+        assert replaced_10 is not None, "rule 10 missing after whole-rule replace"
+        assert isinstance(replaced_10, dict)
+        assert "destination" not in replaced_10
+        assert _instance_child(replaced_10, "destination") is None
+        assert _leaf_scalar(replaced_10.get("action")) == "accept"
+        assert _leaf_scalar(replaced_10.get("protocol")) == "tcp"
+        assert replaced_20 is not None, "unlisted rule 20 was removed (must stay unmanaged)"
+        assert isinstance(replaced_20, dict)
+        assert _leaf_scalar(replaced_20.get("action")) == "drop"
+        assert _leaf_scalar(replaced_20.get("protocol")) == "udp"
+        assert _leaf_scalar(replaced_node.get("default-action")) == _P7_DEFAULT_ACTION
+        assert _leaf_scalar(replaced_node.get("description")) == _P7_DESCRIPTION
+
+        deleted_rule = apply(
+            firewall_ruleset,
+            inventory=inventory,
+            af="ipv4",
+            chain=list(_P7_CHAIN),
+            rules={20: None},
+            save=False,
+        )
+        assert deleted_rule.did_change()
+        _assert_sentinel(deleted_rule, SENTINEL_CHANGED)
+        after_delete = _op_mode_named_ruleset(inventory, _P7_CHAIN_NAME)
+        assert after_delete is not None
+        after_delete_rules = _ruleset_rules(after_delete)
+        assert _rule_body(after_delete_rules, 20) is None, (
+            f"rule 20 still present after delete; keys={list(after_delete_rules)!r}"
+        )
+        kept_10 = _rule_body(after_delete_rules, 10)
+        assert kept_10 is not None, "rule 10 missing after deleting rule 20"
+        assert isinstance(kept_10, dict)
+        assert "destination" not in kept_10
+        assert _leaf_scalar(kept_10.get("action")) == "accept"
+
+        pruned = apply(
+            firewall_ruleset,
+            inventory=inventory,
+            af="ipv4",
+            chain=list(_P7_CHAIN),
+            replace_rules=True,
+            rules={},
+            save=False,
+        )
+        assert pruned.did_change()
+        _assert_sentinel(pruned, SENTINEL_CHANGED)
+        pruned_node = _op_mode_named_ruleset(inventory, _P7_CHAIN_NAME)
+        assert pruned_node is not None, f"named chain {_P7_CHAIN_NAME} missing after prune-all"
+        assert "rule" not in pruned_node, (
+            f"rule node still present after prune-all: {pruned_node.get('rule')!r}"
+        )
+        assert _leaf_scalar(pruned_node.get("default-action")) == _P7_DEFAULT_ACTION
+        assert _leaf_scalar(pruned_node.get("description")) == _P7_DESCRIPTION
+
+        deleted = apply(
+            firewall_ruleset,
+            inventory=inventory,
+            af="ipv4",
+            chain=list(_P7_CHAIN),
+            present=False,
+            save=False,
+        )
+        assert deleted.did_change()
+        _assert_sentinel(deleted, SENTINEL_CHANGED)
+        assert _op_mode_named_ruleset(inventory, _P7_CHAIN_NAME) is None
+
+        deleted_again = apply(
+            firewall_ruleset,
+            inventory=inventory,
+            af="ipv4",
+            chain=list(_P7_CHAIN),
+            present=False,
+            save=False,
+        )
+        assert not deleted_again.did_change()
+        assert _op_mode_named_ruleset(inventory, _P7_CHAIN_NAME) is None
+    finally:
+        _delete_p7_ruleset(inventory)
+        assert _op_mode_named_ruleset(inventory, _P7_CHAIN_NAME) is None, (
+            f"cleanup left named ruleset {_P7_CHAIN_NAME} on the device"
         )

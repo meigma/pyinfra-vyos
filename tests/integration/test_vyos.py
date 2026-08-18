@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ from pyinfra_vyos import (
     config_load,
     config_save,
     firewall_group,
+    firewall_ruleset,
     interface,
     static_route,
     system_basics,
@@ -626,6 +628,145 @@ def test_firewall_group_without_vbash_fails_closed_on_unknown_version() -> None:
 
     with pytest.raises(OperationValueError) as caught:
         prepare(firewall_group, group="pyfw", group_type="address", members=["192.0.2.10"])
+
+    message = str(caught.value)
+    assert "config" in message
+    assert "config_load" in message
+
+
+def test_firewall_ruleset_prepare_renders_one_script_for_multiple_scopes(
+    vbash_shim: Path,
+) -> None:
+    """Fixture Configuration is {}; default_action + two rules share one session."""
+
+    state, meta = prepare(
+        firewall_ruleset,
+        af="ipv4",
+        chain=["name", "PYINFRA_TEST"],
+        default_action="accept",
+        rules={
+            10: {"action": "accept"},
+            20: {"action": "drop"},
+        },
+    )
+    commands = operation_commands(state)
+
+    assert meta.will_change
+    assert len(commands) == 5
+    probe, mkdir, upload, chmod, run = commands
+    assert isinstance(probe, StringCommand)
+    assert probe.get_raw_value() == sg_probe().get_raw_value()
+    assert mkdir.get_raw_value().startswith("mkdir -m 700 ")
+    assert isinstance(upload, FileUploadCommand)
+    assert upload.dest.endswith("/session.sh")
+    assert isinstance(upload.src, StringIO)
+    script = upload.src.getvalue()
+    assert "set firewall ipv4 name PYINFRA_TEST default-action accept" in script
+    assert "set firewall ipv4 name PYINFRA_TEST rule 10 action accept" in script
+    assert "set firewall ipv4 name PYINFRA_TEST rule 20 action drop" in script
+    assert chmod.get_raw_value().startswith("chmod 600 ")
+    rendered = run.get_raw_value()
+    assert rendered == sg_vbash_run(upload.dest, upload.dest[: -len("/session.sh")]).get_raw_value()
+    assert vbash_shim.is_file()
+
+
+def test_firewall_ruleset_none_entry_deletes_the_named_rule(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A populated shim tree plus ``{20: None}`` plans ``delete … rule 20``."""
+
+    from pyinfra_vyos._parse import OUTPUT_MARKER
+
+    bindir = tmp_path / "vbash-shim-ruleset"
+    bindir.mkdir()
+    shim = bindir / "vbash"
+    config_json = (
+        '{"firewall":{"ipv4":{"name":{"PYINFRA_TEST":{"rule":{"20":{"action":["drop"]}}}}}}}'
+    )
+    shim.write_text(
+        "#!/bin/sh\n"
+        'payload="$2"\n'
+        'case "$payload" in\n'
+        '*"show version"*)\n'
+        "    printf '%s\\n' 'Version:          VyOS 2026.03'\n"
+        f"    printf '\\n%s\\n' '{OUTPUT_MARKER}'\n"
+        "    ;;\n"
+        '*"show configuration json"*)\n'
+        f"    printf '%s\\n' '{config_json}'\n"
+        f"    printf '\\n%s\\n' '{OUTPUT_MARKER}'\n"
+        "    ;;\n"
+        "*)\n"
+        "    exit 1\n"
+        "    ;;\n"
+        "esac\n"
+    )
+    shim.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+
+    state, meta = prepare(
+        firewall_ruleset,
+        af="ipv4",
+        chain=["name", "PYINFRA_TEST"],
+        rules={20: None},
+    )
+    upload = operation_commands(state)[2]
+
+    assert meta.will_change
+    assert isinstance(upload, FileUploadCommand)
+    assert isinstance(upload.src, StringIO)
+    assert "delete firewall ipv4 name PYINFRA_TEST rule 20" in upload.src.getvalue()
+
+
+def test_firewall_ruleset_absent_on_empty_tree_noops(vbash_shim: Path) -> None:
+    """Fixture Configuration is {}; present=False of a missing chain noops."""
+
+    _state, meta = prepare(
+        firewall_ruleset,
+        af="ipv4",
+        chain=["name", "PYINFRA_TEST"],
+        present=False,
+    )
+
+    assert not meta.will_change
+    assert vbash_shim.is_file()
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"af": "ipv4", "chain": ["name", "PYINFRA_TEST"]},
+        {"af": "ipv4", "chain": ["name", "PYINFRA_TEST"], "rules": {10: {}}},
+        {"af": "ipv4", "chain": ["name", "PYINFRA_TEST"], "replace_rules": True},
+        {
+            "af": "ipv4",
+            "chain": ["name", "PYINFRA_TEST"],
+            "present": False,
+            "rules": {10: {"action": "accept"}},
+        },
+    ],
+)
+def test_firewall_ruleset_rejections_surface_as_operation_value_error(
+    kwargs: dict[str, Any],
+) -> None:
+    """Schema-independent failures raise OperationValueError, not the Version gate."""
+
+    with pytest.raises(OperationValueError) as caught:
+        prepare(firewall_ruleset, **kwargs)
+
+    message = str(caught.value)
+    assert "config_load" not in message
+
+
+def test_firewall_ruleset_without_vbash_fails_closed_on_unknown_version() -> None:
+    """@local has no vbash, so Version is default/empty and the gate fails closed."""
+
+    with pytest.raises(OperationValueError) as caught:
+        prepare(
+            firewall_ruleset,
+            af="ipv4",
+            chain=["name", "PYINFRA_TEST"],
+            default_action="accept",
+        )
 
     message = str(caught.value)
     assert "config" in message
