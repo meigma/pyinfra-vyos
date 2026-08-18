@@ -372,3 +372,27 @@ the orchestrator, not delegated.
 Next: session-close when the user is ready (PR #16 pending review; release
 PR #7 for 0.1.0 still open from session 001 and now carries the whole
 wave-2 surface — worth a look before cutting).
+
+## 2026-08-16 05:10 — CHANGELOG seed removed; release PR regenerated clean
+Release-readiness check found the 0.1.0 release PR proposing a CHANGELOG.md
+ending in a stray `## Changelog` heading. Cause: the template's initial
+commit seeded the file with a bare `# Changelog`, which Release Please
+treats as pre-existing content and preserves BELOW its generated section.
+- Fix: deleted the seed (PR #17, `chore:`). Nothing consumed the file — it
+  ships in neither wheel nor sdist; the only references were release-
+  please's own `changelog-path` and a workflow comment.
+- MECHANICS LESSON: merging a `chore:` commit does NOT refresh an open
+  release PR — Release Please only rewrites the release branch when
+  RELEASABLE (non-hidden) commits land. The old PR #7 stayed on its
+  pre-removal base. Hand-editing that branch would violate the
+  release-please-owns-it rule, so the native recovery is: delete the
+  release branch (this closes the PR), then `gh workflow run
+  release-please.yml`; Release Please regenerates from current main.
+  It is idempotent — everything derives from git history + the manifest.
+- Result: PR #7 CLOSED (superseded); PR #18 open with a clean 16-line
+  CHANGELOG.md created from scratch (header + 0.1.0 + nine feat entries,
+  no trailing heading). Package Release Dry Run passes on #18.
+- Release readiness: GO. pyproject/uv.lock already 0.1.0 so #18 touches
+  only the manifest and changelog; no v* tags exist; `pypi` environment
+  present; release.yml is tag-triggered (rebuild -> trusted publish ->
+  attest -> human publishes the draft).
