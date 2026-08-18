@@ -210,3 +210,24 @@ worktree incidents (green-state commits + cwd discipline holding).
   user failed at planning, device untouched (verified by independent read).
 - Secret discipline held end-to-end: hash only in capture lines of the
   script, never diagnostics; no hash in capture files.
+
+## 2026-08-16 01:05 — Phase 6 implemented; PR #14 open for review
+Same pattern in `feat/firewall-group`; PR #14 open, CI green.
+- INCIDENT (contained): renderer agent hung (killed via hub cancel); the
+  op agent had crossed its file boundary and landed the pinned renderer
+  itself — correct code, verified against VyOS docs; a third agent wrote
+  the missing 6.1 test surface. No corruption (dead agent never wrote);
+  green-state commit discipline meant zero recovery work.
+- Review verdict: CORRECT — first phase with no functional defect. 3
+  hardening findings applied: planner pin for the Exact({}) empty-group
+  contract (the phase-5 ssh_keys={} class, now regression-tested on the
+  exact diff_tree line), port-group re-apply idempotency assertion on the
+  canonicalization hotspot (capture was recorded but untested), uniform
+  member element error.
+- Reviewer verified in vyos-1x source that memberless static groups only
+  WARN (bare presence set commit-valid) — the Exact({}) reasoning holds.
+- Appliance 13/13: address-group cycle with member+description prune;
+  port-group canonicalization CLEAN (8080 + 8000-9000 echoed verbatim,
+  re-apply noops); referenced-delete probe: commit refused with diagnostic
+  surfaced, group intact (consistent with Q2 atomicity data point).
+- One op remains (firewall_ruleset, phase 7) then docs (phase 8).
