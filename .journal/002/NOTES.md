@@ -256,3 +256,89 @@ stall — all four held file boundaries, zero incidents.
   echoed verbatim.
 - Wave-2 op set COMPLETE: 9 ops (config_load, config, config_save + six
   typed) + 4 facts. Only phase 8 (docs) remains.
+
+## 2026-08-16 04:05 — Wave-2 learned reference (plan 8.3)
+Consolidated record for future waves. Sources: appliance captures in
+`tests/integration/_captures/`, per-phase review findings, hardware runs.
+
+### Architecture open questions — answered
+- Q1 (fact cache): pyinfra `Host.get_fact` is cache-free across the whole
+  supported range; `api/facts.py` + `api/host.py` byte-identical between
+  3.9.2 and 3.10.0; empirically 3 calls = 3 executions. No floor change.
+  Consequence: execute-time planning always sees post-prior-op state.
+- Q2 (rejected commit): on VyOS 2026.03 a refused commit left NO partial
+  active state (chain and rule both absent). Lab-release data point only;
+  contract language stays conservative.
+- Q3 (domain-name + domain-search): ACCEPTED together by the device.
+  Answered by observation; never encoded as controller validation.
+- Q4 (interface_type inference): kept explicit by design; name-prefix
+  inference rejected as magic. Revisit only with user-friction evidence.
+
+### Canonicalization forms learned (VyOS 2026.03)
+Every observed form was VERBATIM except one, which was the inverse of the
+expected risk:
+- interface: address `192.0.2.65/32`, description, mtu `1400` verbatim.
+- static_route: route tag-node keys stored verbatim — expanded/uppercase
+  IPv6 round-trips unchanged. The plan's risk table assumed compression.
+  Real hazard is the inverse: two textual forms of one prefix create two
+  distinct route nodes. Documented; standardize on compressed lowercase.
+- user: public-key body verbatim; encrypted-password hash round-trips as
+  stable text (this is what makes hash comparison idempotent).
+- firewall_group: port `8080` and range `8000-9000` verbatim.
+- firewall_ruleset: int rule numbers echo as STRINGS — renderer's
+  coerce_token already emits strings, so T3 noop holds.
+- system_basics: domain-search order preserved; time-zone verbatim.
+Net: no normalization code was ever needed. Learned forms live in
+docstrings and here, per the architecture's §10 handling.
+
+### Hardware lesson (destructive, worth carrying)
+Committing blackholed TEST-NET `system name-server` entries deterministically
+breaks SSH auth for every subsequent session (2x reproduced, fresh VM each;
+reboot recovers because boot config is untouched). The appliance tier must
+never mutate the management-path resolver. Name-server Exact-list semantics
+stay covered at unit/@local only.
+
+### Empty-collection semantics — three different right answers
+A recurring hazard class; each resolved by the node's own grammar:
+- `ssh_keys={}` -> Absent at the child leaf (phase-5 review: Exact({}) was
+  non-convergent, hard-failing every re-run).
+- `firewall_group members=[]` -> Exact({}) is fine: the group node itself is
+  a valid leaf-less node (memberless groups only WARN in vyos-1x).
+- `firewall_ruleset rules={}` -> Absent at the `rule` node, and rejected
+  entirely unless replace_rules=True: `set <chain> rule` is invalid for a
+  tag node needing a tag value.
+Lesson for later waves: decide empty-collection intent per node grammar,
+and always pin it with a planner-level convergence test.
+
+### Review value (7 phases, 1 tight pass each)
+Caught 4 defects that unit tests would not have: the destructive leaf-root
+delete (phase 1), the fail-OPEN schema_key prefix match (phase 2), the
+bare-host route destination that never round-trips (phase 4), the duplicate
+rule-number collision planning two deletes and zero sets (phase 7). Plus a
+lab-hash leak via pytest assertion rewriting (phase 5). Verdicts: 6
+approve-with-fixes, 1 correct.
+
+### Process lessons (orchestration)
+- Commit the worktree at every green gate. Phase 3 lost a test file to a
+  dying agent's elided-read overwrite; recovery was transcript archaeology.
+  Later phases had zero recovery cost.
+- Give each parallel agent a DISJOINT file set and say so explicitly; two
+  phases saw agents cross boundaries or split work across the repo root and
+  the worktree when a sibling stalled.
+- Split a large renderer's test surface into its own agent (phase 7) —
+  removes the stall-then-boundary-cross pattern seen in phase 6.
+- Capture hardware literals BEFORE writing fixtures that depend on them
+  (phase 2: the real Version string is `VyOS 2026.03`, no patch component).
+
+### Carried debt / deferred (triggers named in ARCHITECTURE)
+- `config_load` inline command assembly stays out of `_cli.py` (A3 debt,
+  §2) — deliberately out of wave.
+- Fixture provenance: `show version` unit fixtures remain synthesized;
+  appliance captures exist and could replace them.
+- Deferred ops: `nat_rule` (pure `config` replace at a numbered key),
+  `ntp`, `syslog`, `ssh_service`, `dns_forwarding`, `dhcp_server`,
+  composite interfaces, dynamic/remote firewall groups, prefix lists /
+  route maps / BGP / OSPF, wireguard, ipsec, image management,
+  commit-confirm.
+- Deferred infrastructure: scoped facts (`ConfigExists`/`ConfigValue`) on a
+  measured cost trigger; typed convenience facts; cross-op batching.
