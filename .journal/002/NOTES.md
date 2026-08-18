@@ -396,3 +396,36 @@ treats as pre-existing content and preserves BELOW its generated section.
   only the manifest and changelog; no v* tags exist; `pypi` environment
   present; release.yml is tag-triggered (rebuild -> trusted publish ->
   attest -> human publishes the draft).
+
+## 2026-08-16 05:35 — 0.1.0 released to PyPI; draft awaits human publish
+Merged release PR #18 (`0fe1773`). Pipeline executed and validated end to end.
+- Release Please: created tag `v0.1.0` (points at 0fe1773) + DRAFT GitHub
+  release with the nine-feature notes.
+- release.yml (tag-triggered) all green: Resolve Release -> Publish to PyPI
+  -> attest-artifacts/Attest -> Release Inspection Summary.
+- PyPI: pyinfra-vyos 0.1.0 live; wheel 46,507 B
+  sha256 ac17afa2...58b2fa7; sdist 258,803 B sha256 917190da...f07cfd0c;
+  requires-python >=3.11; license MIT OR Apache-2.0.
+- VALIDATED from PyPI (not a local build): fresh venv install of
+  `pyinfra-vyos==0.1.0`, all 13 exports present, 9 ops carry `_inner`,
+  4 facts subclass FactBase, py.typed shipped, firewall_ruleset signature
+  intact.
+- PROVENANCE: `gh attestation verify` exits 0 for BOTH published files.
+  One SLSA provenance v1 statement covers both subjects; digests match the
+  PyPI bytes exactly. Signer: attest.yml, ref refs/tags/v0.1.0, commit
+  0fe1773, github-hosted runner, Actions OIDC issuer. This is the SLSA L3
+  claim actually holding.
+- GAP FOUND (not a blocker): PyPI's PEP 740 endpoint
+  (`/integrity/.../provenance`) returns 404 for both files, because the
+  upload step is `uv publish --trusted-publishing always`, and uv does not
+  send PEP 740 attestations (that is a pypa/gh-action-pypi-publish/twine
+  feature). Consequence: provenance is verifiable via GitHub's attestation
+  store but NOT visible where a PyPI consumer would look. Options for a
+  later release: keep uv publish and document `gh attestation verify` as the
+  verification path, or switch the upload step to gh-action-pypi-publish
+  with attestations enabled. Recorded as backlog, not fixed mid-release.
+- Release assets are empty by design: distribution is PyPI, and
+  checksums.txt is deliberately written outside dist/ to feed attestation
+  subjects rather than to be uploaded.
+- REMAINING HUMAN STEP (by design, release.yml header): publish the draft
+  release after inspection — `gh release edit v0.1.0 --draft=false`.
