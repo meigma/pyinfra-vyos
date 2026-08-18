@@ -231,3 +231,28 @@ Same pattern in `feat/firewall-group`; PR #14 open, CI green.
   re-apply noops); referenced-delete probe: commit refused with diagnostic
   surfaced, group intact (consistent with Q2 atomicity data point).
 - One op remains (firewall_ruleset, phase 7) then docs (phase 8).
+
+## 2026-08-16 03:40 — Phase 7 implemented; PR #15 open for review
+Same pattern in `feat/firewall-ruleset`; PR #15 open, CI green. Split the
+renderer's test surface into its own agent (4-agent wave) after phase 6's
+stall — all four held file boundaries, zero incidents.
+- Review (approve-with-fixes) P1: rules={10:..., "10":...} collapsed to one
+  token after int coercion -> TWO Exact scopes on the identical rule path;
+  planner emitted two deletes and ZERO sets, stripping the rule to nothing
+  (silently dropped one body under replace_rules=True). Rejected in the
+  shared helper now. P2: rules={} with replace_rules=False silently owned
+  nothing while claiming a noop — contradicted the package's own
+  empty-collection convention; rejected, names replace_rules=True as the
+  prune-all form. P3s: renderer enforces its documented present=False /
+  replace_rules exclusion (was op-only); docstring op count fixed.
+- rules={} + replace_rules=True renders Absent at the rule node (NOT
+  Exact({})): `set <chain> rule` is invalid for a tag node needing a tag
+  value — differs from phase-6 groups whose path carries its value.
+  Reviewer confirmed both directions independently.
+- Appliance 14/14 on custom chain PYINFRA_P7: whole-rule replace with leaf
+  prune (unlisted rule untouched), single-rule {n: None} delete, prune-all,
+  delete-noop. Canonicalization: int rule keys echo as STRINGS — renderer's
+  coerce_token(str) matches, so T3 noop holds; action/protocol/port forms
+  echoed verbatim.
+- Wave-2 op set COMPLETE: 9 ops (config_load, config, config_save + six
+  typed) + 4 facts. Only phase 8 (docs) remains.
