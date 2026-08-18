@@ -342,3 +342,33 @@ approve-with-fixes, 1 correct.
   commit-confirm.
 - Deferred infrastructure: scoped facts (`ConfigExists`/`ConfigValue`) on a
   measured cost trigger; typed convenience facts; cross-op batching.
+
+## 2026-08-16 04:35 — Phase 8 implemented; PR #16 open. WAVE 2 COMPLETE.
+Two technical-writer agents (README, docs site — disjoint files) + one
+conformance specialist + one fix agent. Journal reference (8.3) written by
+the orchestrator, not delegated.
+- Conformance verdict FAIL initially, 5 P1s. Two were PRE-EXISTING, not
+  introduced by phase 8:
+  (a) both docs described `strip_private` as VyOS op-pipe tokens passed as
+      argv — a stale wave-1 claim that session-001 hardware testing had
+      ALREADY superseded (real behavior: shell pipeline through
+      /usr/libexec/vyos/strip-private.py under pipefail). The doc outlived
+      the correction because wave-1 docs were never re-read against the
+      amended architecture.
+  (b) `facts.py` module docstring claimed every fact runs via
+      vyos_op_command — false since PendingSave landed in phase 1. Source
+      docstring fixed.
+  Lesson: when a hardware finding amends an architecture decision, re-grep
+  the consumer docs for the superseded claim in the SAME phase.
+- Other P1s: README overgeneralized per-field ownership; rules={} described
+  as own-and-empty (it is rejected unless replace_rules=True); config_save
+  described as diffing Configuration (it reads PendingSave); count seven ->
+  six typed; evaluative wording -> observable; config_load added to the
+  operation reference.
+- Final smoke (plan line 373) PASSED: wheel built, installed into an
+  isolated venv, all 13 exports importable.
+- Wave-2 delivery: 8 phases, 8 PRs (#9-#16), 9 operations + 4 facts,
+  570 unit tests, appliance tier 14/14 on VyOS 2026.03.
+Next: session-close when the user is ready (PR #16 pending review; release
+PR #7 for 0.1.0 still open from session 001 and now carries the whole
+wave-2 surface — worth a look before cutting).
