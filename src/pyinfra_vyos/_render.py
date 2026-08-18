@@ -747,13 +747,25 @@ def _validated_chain(chain: object) -> list[str]:
 def _sorted_rule_items(
     rules: dict[int | str, dict[str, object] | None],
 ) -> list[tuple[str, dict[str, object] | None]]:
-    """Order rule entries: numeric-ascending when every key is digits, else string."""
+    """Order rule entries: numeric-ascending when every key is digits, else string.
+
+    Distinct original keys that coerce to the same path token (``10`` and
+    ``"10"``) are rejected: both branches would otherwise collapse them.
+    """
 
     items: list[tuple[str, dict[str, object] | None]] = []
+    seen: dict[str, int | str] = {}
     for key, body in rules.items():
         if not isinstance(key, (str, int)):
             raise RenderError("rule numbers must be strings or ints")
         token = coerce_token(key)
+        prior = seen.get(token)
+        if prior is not None:
+            raise RenderError(
+                f"duplicate rule number {token}: keys {prior!r} and {key!r} "
+                "coerce to the same path token"
+            )
+        seen[token] = key
         items.append((token, body))
     if items and all(token.isdigit() for token, _ in items):
         items.sort(key=lambda item: int(item[0]))
@@ -785,7 +797,8 @@ def render_firewall_ruleset(
     number at ``… rule <n>``. A ``None`` entry is ``Absent`` at that
     rule; a non-``None`` body is a TOTAL whole-rule replace
     (undeclared leaves prune). Unlisted rules are unmanaged. Empty
-    bodies are rejected.
+    bodies are rejected. ``rules={}`` is also rejected: prune-all is
+    ``rules={}`` with ``replace_rules=True``.
 
     ``replace_rules=True`` is destructive (Ansible ``overridden``):
     one scope at the ``rule`` node makes the chain's rule set exactly
@@ -809,7 +822,7 @@ def render_firewall_ruleset(
     Owns-nothing (``present=True``, ``replace_rules=False``, and
     every desired argument ``None``) is an error. ``present=False``
     is a single ``Absent`` at the chain path; every desired-state
-    argument must be unset.
+    argument, including ``replace_rules=True``, must be unset.
     """
 
     try:
@@ -826,7 +839,11 @@ def render_firewall_ruleset(
         "rules": rules,
         "values": values,
     }
-    require_absent_args_unset(present, **desired_args)
+    require_absent_args_unset(
+        present,
+        **desired_args,
+        replace_rules=(replace_rules or None),
+    )
 
     chain_tokens = _validated_chain(chain)
     path = _validated_path(["firewall", af, *chain_tokens])
@@ -837,6 +854,11 @@ def render_firewall_ruleset(
     if replace_rules:
         if rules is None:
             raise RenderError("replace_rules=True requires rules")
+    elif rules == {}:
+        raise RenderError(
+            "rules={} with replace_rules=False owns nothing; "
+            "use replace_rules=True to prune every rule"
+        )
     elif all(value is None for value in desired_args.values()):
         raise RenderError(
             "firewall_ruleset requires at least one of default_action, description, rules, values"

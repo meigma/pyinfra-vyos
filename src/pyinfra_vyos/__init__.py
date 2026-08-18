@@ -1,7 +1,7 @@
 """VyOS facts and operations packaged as a reusable pyinfra plugin.
 
 The primitives exported here are the wave-2 surface: a whole-config load,
-a scoped subtree operation, a persist phase, seven typed operations, and
+a scoped subtree operation, a persist phase, six typed operations, and
 four op-mode facts, all over ``sg vyattacfg`` + ``/bin/vbash`` +
 script-template. Callers compose SOPS, templating, backup, and
 verification on top; this package does not.

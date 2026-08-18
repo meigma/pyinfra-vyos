@@ -421,8 +421,20 @@ def test_firewall_ruleset_signature_is_positional_af_and_chain_then_keyword_only
             "present": False,
             "rules": {10: {"action": "accept"}},
         },
+        {
+            "af": "ipv4",
+            "chain": ["name", "WAN_IN"],
+            "present": False,
+            "replace_rules": True,
+        },
         {"af": "ipv4", "chain": ["name", "WAN_IN"]},
         {"af": "ipv4", "chain": ["name", "WAN_IN"], "rules": {10: {}}},
+        {"af": "ipv4", "chain": ["name", "WAN_IN"], "rules": {}},
+        {
+            "af": "ipv4",
+            "chain": ["name", "WAN_IN"],
+            "rules": {10: {"action": "accept"}, "10": {"protocol": "tcp"}},
+        },
         {"af": "ipv4", "chain": ["name", "WAN_IN"], "replace_rules": True},
     ],
 )
@@ -431,11 +443,12 @@ def test_firewall_ruleset_schema_independent_rejections_surface_before_any_host_
 ) -> None:
     """Validation raises OperationValueError before host.get_fact is reached.
 
-    present=False+rules hits require_absent_args_unset; owns-nothing, empty
-    rule body, and replace_rules=True with rules=None hit the hoisted
-    renderer. These run without pyinfra host context: reaching the fact
-    lookup would raise a context error instead, so passing proves the
-    checks precede Version.
+    present=False+rules / present=False+replace_rules hit
+    require_absent_args_unset; owns-nothing, empty rule body, empty
+    rules, coerced rule-number collision, and replace_rules=True with
+    rules=None hit the hoisted renderer. These run without pyinfra host
+    context: reaching the fact lookup would raise a context error
+    instead, so passing proves the checks precede Version.
     """
 
     with pytest.raises(OperationValueError):

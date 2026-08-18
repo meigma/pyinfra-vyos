@@ -1337,6 +1337,32 @@ def test_render_firewall_ruleset_rejects_bool_rule_key(key: bool) -> None:
         render_firewall_ruleset("1.4", "ipv4", _FIREWALL_RULESET_NAMED, rules={key: _RULE_ACCEPT})
 
 
+@pytest.mark.parametrize("replace_rules", [False, True])
+def test_render_firewall_ruleset_rejects_coerced_rule_number_collision(
+    replace_rules: bool,
+) -> None:
+    with pytest.raises(RenderError) as caught:
+        render_firewall_ruleset(
+            "1.5",
+            "ipv4",
+            _FIREWALL_RULESET_NAMED,
+            rules={10: {"action": "accept"}, "10": {"protocol": "tcp"}},
+            replace_rules=replace_rules,
+        )
+
+    message = str(caught.value)
+    assert "duplicate rule number 10" in message
+    assert "10" in message
+    assert "'10'" in message
+
+
+def test_render_firewall_ruleset_empty_rules_requires_replace_rules() -> None:
+    with pytest.raises(RenderError) as caught:
+        render_firewall_ruleset("1.5", "ipv4", _FIREWALL_RULESET_NAMED, rules={})
+
+    assert "replace_rules=True" in str(caught.value)
+
+
 def test_render_firewall_ruleset_replace_rules_requires_rules() -> None:
     with pytest.raises(RenderError) as caught:
         render_firewall_ruleset("1.4", "ipv4", _FIREWALL_RULESET_NAMED, replace_rules=True)
@@ -1503,6 +1529,7 @@ def test_render_firewall_ruleset_owns_nothing_rejected() -> None:
         {"description": "x"},
         {"rules": {10: _RULE_ACCEPT}},
         {"values": {"enable-default-log": {}}},
+        {"replace_rules": True},
     ],
 )
 def test_render_firewall_ruleset_present_false_rejects_desired_args(
