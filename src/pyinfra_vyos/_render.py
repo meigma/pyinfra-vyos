@@ -4,8 +4,8 @@ Typed operations are renderers (A2, D6). This module holds the ``Scope``
 algebra, the helpers every renderer shares, and the per-op renderer
 functions themselves — :func:`render_system_basics`,
 :func:`render_interface`, :func:`render_static_route`,
-:func:`render_user`, and :func:`render_firewall_group` so far; later
-phases add their own. There is no I/O
+:func:`render_user`, :func:`render_firewall_group`, and
+:func:`render_firewall_ruleset`. There is no I/O
 and no pyinfra state. Callers pass values in and get values out.
 
 Layer contract: a renderer maps a desired keyword model plus a schema key
@@ -40,6 +40,7 @@ __all__ = [
     "coerce_token",
     "parse_route_destination",
     "render_firewall_group",
+    "render_firewall_ruleset",
     "render_interface",
     "render_static_route",
     "render_system_basics",
@@ -705,3 +706,231 @@ def render_firewall_group(
             raise RenderError("description must be a string")
         body["description"] = _validated_leaf(description, field="description", where="description")
     return [Scope(path=path, intent=Exact(node=body))]
+
+
+# D9 seam: 1.4 and 1.5 emit the same R§2 modern-baseline firewall
+# address-family chain model (``firewall <af> <*chain>``). Tables are
+# keyed by schema anyway so a later fork does not break this signature.
+_FIREWALL_RULESET_AF_SET = frozenset({"ipv4", "ipv6"})
+_FIREWALL_RULESET_AFS: dict[str, frozenset[str]] = {
+    "1.4": _FIREWALL_RULESET_AF_SET,
+    "1.5": _FIREWALL_RULESET_AF_SET,
+}
+
+# values top-level key -> typed argument to use instead (D10).
+_FIREWALL_RULESET_TYPED_KEYS: dict[str, str] = {
+    "default-action": "default_action",
+    "description": "description",
+    "rule": "rules",
+}
+
+
+def _validated_chain(chain: object) -> list[str]:
+    """Validate *chain* as a nonempty C2 token list; errors name ``chain``."""
+
+    if not isinstance(chain, (list, tuple)) or not chain:
+        raise RenderError("chain must be a nonempty list of config path tokens")
+    tokens: list[str] = []
+    for token in chain:
+        if not isinstance(token, str):
+            raise RenderError(
+                f"chain token must be a string, got {type(token).__name__}: {token!r}"
+            )
+        if not token:
+            raise RenderError("chain token must be a nonempty string")
+        if token.startswith("-"):
+            raise RenderError(f"chain token must not begin with '-': {token!r}")
+        tokens.append(token)
+    return tokens
+
+
+def _sorted_rule_items(
+    rules: dict[int | str, dict[str, object] | None],
+) -> list[tuple[str, dict[str, object] | None]]:
+    """Order rule entries: numeric-ascending when every key is digits, else string.
+
+    Distinct original keys that coerce to the same path token (``10`` and
+    ``"10"``) are rejected: both branches would otherwise collapse them.
+    """
+
+    items: list[tuple[str, dict[str, object] | None]] = []
+    seen: dict[str, int | str] = {}
+    for key, body in rules.items():
+        if not isinstance(key, (str, int)):
+            raise RenderError("rule numbers must be strings or ints")
+        token = coerce_token(key)
+        prior = seen.get(token)
+        if prior is not None:
+            raise RenderError(
+                f"duplicate rule number {token}: keys {prior!r} and {key!r} "
+                "coerce to the same path token"
+            )
+        seen[token] = key
+        items.append((token, body))
+    if items and all(token.isdigit() for token, _ in items):
+        items.sort(key=lambda item: int(item[0]))
+    else:
+        items.sort(key=lambda item: item[0])
+    return items
+
+
+def render_firewall_ruleset(
+    schema: str,
+    af: str,
+    chain: list[str],
+    *,
+    default_action: str | None = None,
+    description: str | None = None,
+    rules: dict[int | str, dict[str, object] | None] | None = None,
+    replace_rules: bool = False,
+    values: dict[str, object] | None = None,
+    present: bool = True,
+) -> list[Scope]:
+    """Render one ``firewall <af> <*chain>`` node as disjoint ``Scope`` values.
+
+    Per-field + per-rule ownership. ``default_action`` / ``description``
+    are ``Exact`` leaves; ``None`` is unmanaged. ``chain`` is an open
+    token list (C2 only): base chains, custom ``name`` chains, and
+    1.5-only chains all pass through.
+
+    ``rules`` with ``replace_rules=False`` emits one scope per rule
+    number at ``… rule <n>``. A ``None`` entry is ``Absent`` at that
+    rule; a non-``None`` body is a TOTAL whole-rule replace
+    (undeclared leaves prune). Unlisted rules are unmanaged. Empty
+    bodies are rejected. ``rules={}`` is also rejected: prune-all is
+    ``rules={}`` with ``replace_rules=True``.
+
+    ``replace_rules=True`` is destructive (Ansible ``overridden``):
+    one scope at the ``rule`` node makes the chain's rule set exactly
+    ``rules``. ``rules`` is required; ``None`` entries are rejected.
+    ``rules={}`` is prune-all: ``Absent`` at the ``rule`` node, not
+    ``Exact({})``. ``Exact({})`` on an absent ``rule`` node plans a
+    bare ``set … rule``, which is not a valid VyOS command for that
+    tag node (phase-5 ``ssh_keys={}`` Absents the child for the same
+    reason; phase-6 group ``Exact({})`` differs because the group
+    node itself is a valid leaf-less node).
+
+    ``values`` is a ``Merge`` at the chain path; top-level keys
+    ``default-action``, ``description``, and ``rule`` collide with
+    typed arguments.
+
+    Scope order is deterministic: ``default-action``, then
+    ``description``, then rule scopes (ascending numeric order of
+    the coerced key when every key is numeric, otherwise sorted by
+    the coerced string), then the ``values`` Merge.
+
+    Owns-nothing (``present=True``, ``replace_rules=False``, and
+    every desired argument ``None``) is an error. ``present=False``
+    is a single ``Absent`` at the chain path; every desired-state
+    argument, including ``replace_rules=True``, must be unset.
+    """
+
+    try:
+        allowed_afs = _FIREWALL_RULESET_AFS[schema]
+    except KeyError as error:
+        raise RenderError(f"unknown schema {schema!r}") from error
+    if af not in allowed_afs:
+        allowed = ", ".join(sorted(allowed_afs))
+        raise RenderError(f"unknown af {af!r}; allowed values: {allowed}")
+
+    desired_args: dict[str, object] = {
+        "default_action": default_action,
+        "description": description,
+        "rules": rules,
+        "values": values,
+    }
+    require_absent_args_unset(
+        present,
+        **desired_args,
+        replace_rules=(replace_rules or None),
+    )
+
+    chain_tokens = _validated_chain(chain)
+    path = _validated_path(["firewall", af, *chain_tokens])
+
+    if not present:
+        return [Scope(path=path, intent=Absent())]
+
+    if replace_rules:
+        if rules is None:
+            raise RenderError("replace_rules=True requires rules")
+    elif rules == {}:
+        raise RenderError(
+            "rules={} with replace_rules=False owns nothing; "
+            "use replace_rules=True to prune every rule"
+        )
+    elif all(value is None for value in desired_args.values()):
+        raise RenderError(
+            "firewall_ruleset requires at least one of default_action, description, rules, values"
+        )
+
+    scopes: list[Scope] = []
+    if default_action is not None:
+        if not isinstance(default_action, str):
+            raise RenderError("default_action must be a string")
+        node = _validated_leaf(default_action, field="default_action", where="default_action")
+        scopes.append(
+            Scope(path=_validated_path([*path, "default-action"]), intent=Exact(node=node))
+        )
+    if description is not None:
+        if not isinstance(description, str):
+            raise RenderError("description must be a string")
+        node = _validated_leaf(description, field="description", where="description")
+        scopes.append(Scope(path=_validated_path([*path, "description"]), intent=Exact(node=node)))
+    if rules is not None:
+        if not isinstance(rules, dict):
+            raise RenderError("rules must be a mapping")
+        if replace_rules:
+            if any(body is None for body in rules.values()):
+                raise RenderError(
+                    "replace_rules=True cannot include None rule entries; "
+                    "mixing deletion into a total replace is ambiguous"
+                )
+            # rules={} must be Absent at the rule node, not Exact({}).
+            # Exact({}) on an ABSENT rule node plans a bare `set ... rule`,
+            # which is NOT a valid VyOS command for the rule tag node
+            # (phase-5 ssh_keys={} Absents the public-keys child for the
+            # same reason; phase-6 group Exact({}) is different because
+            # the group node itself is a valid leaf-less node).
+            if not rules:
+                scopes.append(Scope(path=_validated_path([*path, "rule"]), intent=Absent()))
+            else:
+                tree: dict[str, object] = {}
+                for token, body in _sorted_rule_items(rules):
+                    if not isinstance(body, dict) or not body:
+                        raise RenderError(f"rules[{token}] must be a nonempty mapping")
+                    tree[token] = body
+                try:
+                    subtree = normalize_tree(tree, strict=True, _where="rules")
+                except TreeError as error:
+                    raise RenderError(str(error)) from error
+                scopes.append(
+                    Scope(path=_validated_path([*path, "rule"]), intent=Exact(node=subtree))
+                )
+        else:
+            for token, body in _sorted_rule_items(rules):
+                rule_path = _validated_path([*path, "rule", token])
+                if body is None:
+                    scopes.append(Scope(path=rule_path, intent=Absent()))
+                    continue
+                if not isinstance(body, dict) or not body:
+                    raise RenderError(f"rules[{token}] must be a nonempty mapping")
+                try:
+                    subtree = normalize_tree(body, strict=True, _where=f"rules[{token}]")
+                except TreeError as error:
+                    raise RenderError(str(error)) from error
+                scopes.append(Scope(path=rule_path, intent=Exact(node=subtree)))
+    if values is not None:
+        if isinstance(values, dict):
+            for key in values:
+                if key in _FIREWALL_RULESET_TYPED_KEYS:
+                    typed = _FIREWALL_RULESET_TYPED_KEYS[key]
+                    raise RenderError(
+                        f"values key {key!r} collides with the typed {typed} argument"
+                    )
+        try:
+            merged = normalize_tree(values, strict=True, _where="values")
+        except TreeError as error:
+            raise RenderError(str(error)) from error
+        scopes.append(Scope(path=path, intent=Merge(subtree=merged)))
+    return scopes

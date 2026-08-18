@@ -1,10 +1,10 @@
 """VyOS facts and operations packaged as a reusable pyinfra plugin.
 
-The primitives exported here are the wave-1 substrate plus the first wave-2
-scoped operation: a whole-config load, a scoped subtree operation, and three
-op-mode facts, all over ``sg vyattacfg`` + ``/bin/vbash`` + script-template.
-Callers compose SOPS, templating, backup, and verification on top; this
-package does not.
+The primitives exported here are the wave-2 surface: a whole-config load,
+a scoped subtree operation, a persist phase, six typed operations, and
+four op-mode facts, all over ``sg vyattacfg`` + ``/bin/vbash`` +
+script-template. Callers compose SOPS, templating, backup, and
+verification on top; this package does not.
 
 Layer map:
 
@@ -13,8 +13,8 @@ Layer map:
   :class:`PendingSave`.
 - ``operations.py`` — public ``@operation`` functions only:
   :func:`config`, :func:`config_load`, :func:`config_save`,
-  :func:`firewall_group`, :func:`interface`, :func:`static_route`,
-  :func:`system_basics`, :func:`user`.
+  :func:`firewall_group`, :func:`firewall_ruleset`, :func:`interface`,
+  :func:`static_route`, :func:`system_basics`, :func:`user`.
 - ``_render.py`` — the pure domain for typed-op rendering: ``Scope``
   algebra, schema-key mapping, and per-op renderer functions.
 - ``_session.py`` — the pure domain for the session half: script text,
@@ -40,6 +40,7 @@ from pyinfra_vyos.operations import (
     config_load,
     config_save,
     firewall_group,
+    firewall_ruleset,
     interface,
     static_route,
     system_basics,
@@ -55,6 +56,7 @@ __all__ = [
     "config_load",
     "config_save",
     "firewall_group",
+    "firewall_ruleset",
     "interface",
     "static_route",
     "system_basics",

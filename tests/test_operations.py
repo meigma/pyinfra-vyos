@@ -20,6 +20,7 @@ from pyinfra_vyos._render import (
     Merge,
     Scope,
     render_firewall_group,
+    render_firewall_ruleset,
     render_static_route,
     render_user,
 )
@@ -34,6 +35,7 @@ from pyinfra_vyos.operations import (
     config_load,
     config_save,
     firewall_group,
+    firewall_ruleset,
     interface,
     static_route,
     system_basics,
@@ -156,6 +158,7 @@ def test_package_exports_the_public_primitives() -> None:
         "config_load",
         "config_save",
         "firewall_group",
+        "firewall_ruleset",
         "interface",
         "static_route",
         "system_basics",
@@ -370,6 +373,86 @@ def test_firewall_group_schema_independent_rejections_surface_before_any_host_ac
 
     with pytest.raises(OperationValueError):
         list(firewall_group._inner(**kwargs))
+
+
+def test_firewall_ruleset_signature_is_positional_af_and_chain_then_keyword_only() -> None:
+    parameters = inspect.signature(firewall_ruleset).parameters
+
+    assert list(parameters) == [
+        "af",
+        "chain",
+        "default_action",
+        "description",
+        "rules",
+        "replace_rules",
+        "values",
+        "present",
+        "save",
+    ]
+    assert parameters["af"].kind is parameters["af"].POSITIONAL_OR_KEYWORD
+    assert parameters["chain"].kind is parameters["chain"].POSITIONAL_OR_KEYWORD
+    for name in (
+        "default_action",
+        "description",
+        "rules",
+        "replace_rules",
+        "values",
+        "present",
+        "save",
+    ):
+        assert parameters[name].kind is parameters[name].KEYWORD_ONLY
+    assert parameters["af"].default is inspect.Parameter.empty
+    assert parameters["chain"].default is inspect.Parameter.empty
+    assert parameters["default_action"].default is None
+    assert parameters["description"].default is None
+    assert parameters["rules"].default is None
+    assert parameters["replace_rules"].default is False
+    assert parameters["values"].default is None
+    assert parameters["present"].default is True
+    assert parameters["save"].default is False
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {
+            "af": "ipv4",
+            "chain": ["name", "WAN_IN"],
+            "present": False,
+            "rules": {10: {"action": "accept"}},
+        },
+        {
+            "af": "ipv4",
+            "chain": ["name", "WAN_IN"],
+            "present": False,
+            "replace_rules": True,
+        },
+        {"af": "ipv4", "chain": ["name", "WAN_IN"]},
+        {"af": "ipv4", "chain": ["name", "WAN_IN"], "rules": {10: {}}},
+        {"af": "ipv4", "chain": ["name", "WAN_IN"], "rules": {}},
+        {
+            "af": "ipv4",
+            "chain": ["name", "WAN_IN"],
+            "rules": {10: {"action": "accept"}, "10": {"protocol": "tcp"}},
+        },
+        {"af": "ipv4", "chain": ["name", "WAN_IN"], "replace_rules": True},
+    ],
+)
+def test_firewall_ruleset_schema_independent_rejections_surface_before_any_host_access(
+    kwargs: dict[str, Any],
+) -> None:
+    """Validation raises OperationValueError before host.get_fact is reached.
+
+    present=False+rules / present=False+replace_rules hit
+    require_absent_args_unset; owns-nothing, empty rule body, empty
+    rules, coerced rule-number collision, and replace_rules=True with
+    rules=None hit the hoisted renderer. These run without pyinfra host
+    context: reaching the fact lookup would raise a context error
+    instead, so passing proves the checks precede Version.
+    """
+
+    with pytest.raises(OperationValueError):
+        list(firewall_ruleset._inner(**kwargs))
 
 
 @pytest.mark.parametrize("identity", [None, "", "   ", "\n"])
@@ -839,3 +922,38 @@ def test_plan_scopes_fetches_configuration_once() -> None:
     )
 
     assert host.fact_calls == 1
+
+
+def test_firewall_ruleset_exact_rule_body_prunes_an_undeclared_source() -> None:
+    """Whole-rule replace: a dropped source subtree is deleted, not unmanaged."""
+
+    host = _ConfigurationHost(
+        {
+            "firewall": {
+                "ipv4": {
+                    "name": {
+                        "WAN_IN": {
+                            "rule": {
+                                "10": {
+                                    "action": ["accept"],
+                                    "source": {"address": ["192.0.2.1"]},
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    )
+    scopes = render_firewall_ruleset(
+        "1.5",
+        "ipv4",
+        ["name", "WAN_IN"],
+        rules={10: {"action": "accept"}},
+    )
+
+    planned = _plan_scopes(host, scopes)
+
+    assert planned == [
+        PlannedCommand(["delete", "firewall", "ipv4", "name", "WAN_IN", "rule", "10", "source"])
+    ]

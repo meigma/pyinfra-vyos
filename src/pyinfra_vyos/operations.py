@@ -35,6 +35,7 @@ from pyinfra_vyos._render import (
     Scope,
     parse_route_destination,
     render_firewall_group,
+    render_firewall_ruleset,
     render_interface,
     render_static_route,
     render_system_basics,
@@ -58,6 +59,7 @@ __all__ = [
     "config_load",
     "config_save",
     "firewall_group",
+    "firewall_ruleset",
     "interface",
     "static_route",
     "system_basics",
@@ -809,6 +811,129 @@ def firewall_group(
     commands = _plan_scopes(host, scopes)
     if commands is None:
         host.noop(f"firewall group {group_type} {group} already matches")
+        return
+    staging = staging_dir()
+    yield from session_run_sequence(staging, build_commands_script(staging, commands, save=save))
+
+
+@operation()
+def firewall_ruleset(
+    af: str,
+    chain: list[str],
+    *,
+    default_action: str | None = None,
+    description: str | None = None,
+    rules: dict[int | str, dict[str, Any] | None] | None = None,
+    replace_rules: bool = False,
+    values: dict[str, Any] | None = None,
+    present: bool = True,
+    save: bool = False,
+) -> Generator[StringCommand | FileUploadCommand, None, None]:
+    """Configure one VyOS firewall chain (base or custom).
+
+    ``af`` is ``ipv4`` or ``ipv6``. ``chain`` is an open token list — base
+    chains such as ``["input", "filter"]``, custom chains such as
+    ``["name", "WAN_IN"]``, and 1.5-only chains all pass through; token
+    rules (C2) are the only chain validation. The owned path is
+    ``firewall <af> <*chain>``.
+
+    ``default_action`` and ``description`` are independently owned Exact
+    leaves. ``None`` (the default) leaves that leaf unmanaged.
+
+    **Whole-rule replace**: each declared rule body is TOTAL. Undeclared
+    leaves inside a declared rule are REMOVED. With ``replace_rules=False``
+    (the default), unlisted rule numbers stay unmanaged; ``{n: None}``
+    deletes rule *n*. With ``replace_rules=True`` the chain's entire
+    ``rule`` node becomes exactly ``rules`` — an Ansible-``overridden``
+    analog. That flag is destructive: undeclared active rules are pruned,
+    including rules that keep management access. ``rules`` is required
+    (``{}`` prunes every rule); ``None`` entries are rejected.
+
+    ``values`` is an open-body merge at the chain path. Top-level keys
+    ``default-action``, ``description``, and ``rule`` collide with the
+    typed arguments and are rejected. An owns-nothing call
+    (``present=True``, ``replace_rules=False``, and every desired argument
+    ``None``) is a planning error. ``present=False`` deletes the chain;
+    every desired argument, including ``replace_rules=True``, must then be
+    left unset.
+
+    **Lockout**: changing ``default_action`` on a base chain takes effect
+    at commit and can drop management access. Commit is immediate;
+    ``save=False`` limits reboot persistence only — it is not a dry run
+    and does not protect against lockout. The verify-then-persist
+    workflow is ``firewall_ruleset(..., save=False)`` then
+    :func:`config_save`. Out-of-band recovery (console / OOB access) is
+    assumed if a change severs the controller session.
+
+    **NAT**: there is no typed NAT operation this wave. NAT users should
+    call :func:`config` (``nat_rule`` is deferred by design).
+
+    **Cross-op ordering (D12)**: create firewall groups before rules that
+    reference them. Deleting a referenced group fails at device commit;
+    commit output is the diagnostic. This operation does not inspect
+    referrers. When a caller needs group and ruleset state in one commit,
+    :func:`config` with a broader owned path is the escape hatch.
+
+    **Concurrency precondition**: the caller MUST serialize all mutation
+    sessions per host — at most one mutation session may run at a time,
+    including runs from the same controller (§2 / D4). Overlapping
+    mutation runs are out of contract.
+
+    **Save**: ``save=True`` persists only when this run commits (D13). An
+    empty controller delta noops regardless of ``save``. Save is
+    device-global; typed ownership does not scope persistence.
+
+    **Version gate**: the target's :class:`~pyinfra_vyos.facts.Version`
+    must map to a known 1.4 or 1.5 schema (D9). An unrecognized,
+    unqualified, or missing version fails closed with
+    :class:`~pyinfra.api.exceptions.OperationValueError`; use the
+    version-agnostic :func:`config` / :func:`config_load` on such hosts.
+    """
+
+    # Schema-independent checks. Must run before Version (phase-3 lesson).
+    _guarded(
+        require_absent_args_unset,
+        present,
+        default_action=default_action,
+        description=description,
+        rules=rules,
+        values=values,
+        replace_rules=(replace_rules or None),
+    )
+    # Owns-nothing, empty rule bodies, replace_rules requiredness, and
+    # None-entry rejection live in the renderer. A known schema hoists
+    # those checks before the Version fact (system_basics pattern).
+    if present:
+        _guarded(
+            render_firewall_ruleset,
+            "1.4",
+            af,
+            chain,
+            default_action=default_action,
+            description=description,
+            rules=rules,
+            replace_rules=replace_rules,
+            values=values,
+            present=present,
+        )
+
+    version_map = host.get_fact(Version) or {}
+    schema = _guarded(schema_key, version_map.get("version", ""))
+    scopes = _guarded(
+        render_firewall_ruleset,
+        schema,
+        af,
+        chain,
+        default_action=default_action,
+        description=description,
+        rules=rules,
+        replace_rules=replace_rules,
+        values=values,
+        present=present,
+    )
+    commands = _plan_scopes(host, scopes)
+    if commands is None:
+        host.noop(f"firewall ruleset {af} {' '.join(chain)} already matches")
         return
     staging = staging_dir()
     yield from session_run_sequence(staging, build_commands_script(staging, commands, save=save))

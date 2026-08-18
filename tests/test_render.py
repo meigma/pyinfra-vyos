@@ -14,6 +14,7 @@ from pyinfra_vyos._render import (
     coerce_token,
     parse_route_destination,
     render_firewall_group,
+    render_firewall_ruleset,
     render_interface,
     render_static_route,
     render_system_basics,
@@ -1179,3 +1180,447 @@ def test_render_firewall_group_unknown_schema_rejected() -> None:
         render_firewall_group("9.9", "g1", "address", members=["m1"])
 
     assert "9.9" in str(caught.value)
+
+
+# --- render_firewall_ruleset -------------------------------------------------
+
+
+_FIREWALL_RULESET_AFS = ("ipv4", "ipv6")
+_FIREWALL_RULESET_NAMED = ["name", "WAN_IN"]
+_FIREWALL_RULESET_BASE = ["input", "filter"]
+_FIREWALL_RULESET_IPSEC = ["ipsec", "filter"]
+_RULE_ACCEPT = {"action": "accept"}
+_RULE_DROP = {"action": "drop", "protocol": "tcp"}
+_RULE_ACCEPT_NODE = {"action": ["accept"]}
+_RULE_DROP_NODE = {"action": ["drop"], "protocol": ["tcp"]}
+
+
+def _firewall_ruleset_path(af: str, chain: list[str] | None = None) -> list[str]:
+    return ["firewall", af, *(chain if chain is not None else _FIREWALL_RULESET_NAMED)]
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+@pytest.mark.parametrize("af", _FIREWALL_RULESET_AFS)
+def test_render_firewall_ruleset_accepts_af_under_both_schemas(schema: str, af: str) -> None:
+    scopes = render_firewall_ruleset(schema, af, _FIREWALL_RULESET_NAMED, default_action="accept")
+    assert_disjoint(scopes)
+    assert len(scopes) == 1
+    assert scopes[0].path == [*_firewall_ruleset_path(af), "default-action"]
+    assert scopes[0].intent == Exact(["accept"])
+    assert scopes[0].sensitive is False
+
+
+def test_render_firewall_ruleset_unknown_af_names_allowed_values() -> None:
+    with pytest.raises(RenderError) as caught:
+        render_firewall_ruleset("1.4", "ip", _FIREWALL_RULESET_NAMED, default_action="accept")
+
+    message = str(caught.value)
+    assert "ip" in message
+    for allowed in _FIREWALL_RULESET_AFS:
+        assert allowed in message
+
+
+def test_render_firewall_ruleset_unknown_schema_rejected() -> None:
+    with pytest.raises(RenderError) as caught:
+        render_firewall_ruleset("9.9", "ipv4", _FIREWALL_RULESET_NAMED, default_action="accept")
+
+    assert "9.9" in str(caught.value)
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+@pytest.mark.parametrize(
+    "chain",
+    [_FIREWALL_RULESET_NAMED, _FIREWALL_RULESET_BASE, _FIREWALL_RULESET_IPSEC],
+)
+def test_render_firewall_ruleset_accepts_open_chain_tokens(schema: str, chain: list[str]) -> None:
+    scopes = render_firewall_ruleset(schema, "ipv4", chain, default_action="drop")
+    assert_disjoint(scopes)
+    assert scopes[0].path == [*_firewall_ruleset_path("ipv4", chain), "default-action"]
+    assert scopes[0].intent == Exact(["drop"])
+
+
+@pytest.mark.parametrize("chain", ["WAN_IN", (), [], ["-bad"], [""], [7]])
+def test_render_firewall_ruleset_rejects_invalid_chain_naming_chain(chain: object) -> None:
+    with pytest.raises(RenderError) as caught:
+        render_firewall_ruleset(
+            "1.4",
+            "ipv4",
+            chain,
+            default_action="accept",  # type: ignore[arg-type]
+        )
+
+    assert "chain" in str(caught.value)
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+def test_render_firewall_ruleset_default_action_and_description_are_exact_leaves(
+    schema: str,
+) -> None:
+    scopes = render_firewall_ruleset(
+        schema,
+        "ipv4",
+        _FIREWALL_RULESET_NAMED,
+        default_action="accept",
+        description="wan in",
+    )
+    assert_disjoint(scopes)
+    chain = _firewall_ruleset_path("ipv4")
+    assert [scope.path for scope in scopes] == [
+        [*chain, "default-action"],
+        [*chain, "description"],
+    ]
+    assert [scope.intent for scope in scopes] == [
+        Exact(["accept"]),
+        Exact(["wan in"]),
+    ]
+    assert all(scope.sensitive is False for scope in scopes)
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+def test_render_firewall_ruleset_none_leaves_are_unmanaged(schema: str) -> None:
+    scopes = render_firewall_ruleset(
+        schema,
+        "ipv4",
+        _FIREWALL_RULESET_NAMED,
+        default_action=None,
+        description=None,
+        rules={10: _RULE_ACCEPT},
+    )
+    assert_disjoint(scopes)
+    assert [scope.path for scope in scopes] == [
+        [*_firewall_ruleset_path("ipv4"), "rule", "10"],
+    ]
+    assert scopes[0].intent == Exact(_RULE_ACCEPT_NODE)
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+def test_render_firewall_ruleset_per_rule_scopes_are_exact_and_coerced(
+    schema: str,
+) -> None:
+    scopes = render_firewall_ruleset(
+        schema,
+        "ipv4",
+        _FIREWALL_RULESET_NAMED,
+        rules={20: _RULE_DROP, 10: _RULE_ACCEPT},
+    )
+    assert_disjoint(scopes)
+    chain = _firewall_ruleset_path("ipv4")
+    assert [scope.path for scope in scopes] == [
+        [*chain, "rule", "10"],
+        [*chain, "rule", "20"],
+    ]
+    assert [scope.intent for scope in scopes] == [
+        Exact(_RULE_ACCEPT_NODE),
+        Exact(_RULE_DROP_NODE),
+    ]
+    assert all(scope.sensitive is False for scope in scopes)
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+def test_render_firewall_ruleset_none_rule_body_is_absent(schema: str) -> None:
+    scopes = render_firewall_ruleset(schema, "ipv4", _FIREWALL_RULESET_NAMED, rules={10: None})
+    assert_disjoint(scopes)
+    assert scopes == [
+        Scope([*_firewall_ruleset_path("ipv4"), "rule", "10"], Absent()),
+    ]
+    assert scopes[0].sensitive is False
+
+
+def test_render_firewall_ruleset_empty_rule_body_rejected() -> None:
+    with pytest.raises(RenderError):
+        render_firewall_ruleset("1.4", "ipv4", _FIREWALL_RULESET_NAMED, rules={10: {}})
+
+
+@pytest.mark.parametrize("key", [True, False])
+def test_render_firewall_ruleset_rejects_bool_rule_key(key: bool) -> None:
+    with pytest.raises(RenderError):
+        render_firewall_ruleset("1.4", "ipv4", _FIREWALL_RULESET_NAMED, rules={key: _RULE_ACCEPT})
+
+
+@pytest.mark.parametrize("replace_rules", [False, True])
+def test_render_firewall_ruleset_rejects_coerced_rule_number_collision(
+    replace_rules: bool,
+) -> None:
+    with pytest.raises(RenderError) as caught:
+        render_firewall_ruleset(
+            "1.5",
+            "ipv4",
+            _FIREWALL_RULESET_NAMED,
+            rules={10: {"action": "accept"}, "10": {"protocol": "tcp"}},
+            replace_rules=replace_rules,
+        )
+
+    message = str(caught.value)
+    assert "duplicate rule number 10" in message
+    assert "10" in message
+    assert "'10'" in message
+
+
+def test_render_firewall_ruleset_empty_rules_requires_replace_rules() -> None:
+    with pytest.raises(RenderError) as caught:
+        render_firewall_ruleset("1.5", "ipv4", _FIREWALL_RULESET_NAMED, rules={})
+
+    assert "replace_rules=True" in str(caught.value)
+
+
+def test_render_firewall_ruleset_replace_rules_requires_rules() -> None:
+    with pytest.raises(RenderError) as caught:
+        render_firewall_ruleset("1.4", "ipv4", _FIREWALL_RULESET_NAMED, replace_rules=True)
+
+    assert "rules" in str(caught.value)
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+def test_render_firewall_ruleset_replace_rules_is_one_scope_at_rule(schema: str) -> None:
+    scopes = render_firewall_ruleset(
+        schema,
+        "ipv4",
+        _FIREWALL_RULESET_NAMED,
+        rules={10: _RULE_ACCEPT},
+        replace_rules=True,
+    )
+    assert_disjoint(scopes)
+    assert len(scopes) == 1
+    assert scopes[0].path == [*_firewall_ruleset_path("ipv4"), "rule"]
+    assert scopes[0].intent == Exact({"10": _RULE_ACCEPT_NODE})
+    assert scopes[0].sensitive is False
+    assert not any(scope.path[-1].isdigit() for scope in scopes)
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+def test_render_firewall_ruleset_replace_rules_empty_is_absent_and_noops_when_missing(
+    schema: str,
+) -> None:
+    scopes = render_firewall_ruleset(
+        schema, "ipv4", _FIREWALL_RULESET_NAMED, rules={}, replace_rules=True
+    )
+    assert_disjoint(scopes)
+    assert scopes == [Scope([*_firewall_ruleset_path("ipv4"), "rule"], Absent())]
+    assert scopes[0].sensitive is False
+    # Absent + missing node is the planner's delete-when-present path:
+    # no delete is planned, so the call noops. Exact({}) would instead
+    # plan a bare `set … rule` on an absent node (diff_tree presence set).
+    assert select_subtree({}, scopes[0].path) is None
+    active = {
+        "firewall": {
+            "ipv4": {
+                "name": {
+                    "WAN_IN": {"rule": {"10": {"action": "accept"}}},
+                }
+            }
+        }
+    }
+    assert select_subtree(active, scopes[0].path) == {"10": {"action": ["accept"]}}
+
+
+def test_render_firewall_ruleset_replace_rules_prunes_undeclared_rules() -> None:
+    """replace_rules=True is a total Exact at the rule node: extra numbers delete."""
+
+    active = {
+        "firewall": {
+            "ipv4": {
+                "name": {
+                    "WAN_IN": {
+                        "rule": {
+                            "10": {"action": "accept"},
+                            "20": {"action": "drop"},
+                        }
+                    }
+                }
+            }
+        }
+    }
+    scopes = render_firewall_ruleset(
+        "1.5",
+        "ipv4",
+        _FIREWALL_RULESET_NAMED,
+        rules={10: _RULE_ACCEPT},
+        replace_rules=True,
+    )
+    assert_disjoint(scopes)
+    assert len(scopes) == 1
+    scope = scopes[0]
+    assert isinstance(scope.intent, Exact)
+    deletes, sets = diff_tree(
+        select_subtree(active, scope.path),
+        scope.intent.node,
+        scope.path,
+        replace=True,
+    )
+    assert deletes == [[*scope.path, "20"]]
+    assert sets == []
+
+
+def test_render_firewall_ruleset_replace_rules_rejects_none_entry() -> None:
+    with pytest.raises(RenderError):
+        render_firewall_ruleset(
+            "1.4",
+            "ipv4",
+            _FIREWALL_RULESET_NAMED,
+            rules={10: None},
+            replace_rules=True,
+        )
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+def test_render_firewall_ruleset_values_is_merge_at_chain(schema: str) -> None:
+    scopes = render_firewall_ruleset(
+        schema,
+        "ipv4",
+        _FIREWALL_RULESET_NAMED,
+        values={"enable-default-log": {}},
+    )
+    assert_disjoint(scopes)
+    assert len(scopes) == 1
+    assert scopes[0].path == _firewall_ruleset_path("ipv4")
+    assert scopes[0].intent == Merge({"enable-default-log": {}})
+    assert scopes[0].sensitive is False
+
+
+@pytest.mark.parametrize(
+    ("key", "typed"),
+    [
+        ("default-action", "default_action"),
+        ("description", "description"),
+        ("rule", "rules"),
+    ],
+)
+def test_render_firewall_ruleset_rejects_typed_key_collision(key: str, typed: str) -> None:
+    with pytest.raises(RenderError) as caught:
+        render_firewall_ruleset("1.4", "ipv4", _FIREWALL_RULESET_NAMED, values={key: ["x"]})
+
+    message = str(caught.value)
+    assert key in message
+    assert typed in message
+
+
+def test_render_firewall_ruleset_nested_values_keys_are_not_collisions() -> None:
+    scopes = render_firewall_ruleset(
+        "1.4",
+        "ipv4",
+        _FIREWALL_RULESET_NAMED,
+        values={
+            "offload": {
+                "flowtable": {
+                    "ft": {
+                        "description": "nested",
+                        "rule": {"1": {"action": "offload"}},
+                    }
+                }
+            }
+        },
+    )
+    assert_disjoint(scopes)
+    assert len(scopes) == 1
+    assert scopes[0].path == _firewall_ruleset_path("ipv4")
+    assert isinstance(scopes[0].intent, Merge)
+    assert "offload" in scopes[0].intent.subtree
+
+
+def test_render_firewall_ruleset_owns_nothing_rejected() -> None:
+    with pytest.raises(RenderError):
+        render_firewall_ruleset("1.4", "ipv4", _FIREWALL_RULESET_NAMED)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"default_action": "drop"},
+        {"description": "x"},
+        {"rules": {10: _RULE_ACCEPT}},
+        {"values": {"enable-default-log": {}}},
+        {"replace_rules": True},
+    ],
+)
+def test_render_firewall_ruleset_present_false_rejects_desired_args(
+    kwargs: dict[str, object],
+) -> None:
+    with pytest.raises(RenderError) as caught:
+        render_firewall_ruleset(
+            "1.4",
+            "ipv4",
+            _FIREWALL_RULESET_NAMED,
+            present=False,
+            **kwargs,  # type: ignore[arg-type]
+        )
+
+    name = next(iter(kwargs))
+    assert name in str(caught.value)
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+def test_render_firewall_ruleset_present_false_alone_is_absent(schema: str) -> None:
+    scopes = render_firewall_ruleset(schema, "ipv4", _FIREWALL_RULESET_NAMED, present=False)
+    assert_disjoint(scopes)
+    assert scopes == [Scope(_firewall_ruleset_path("ipv4"), Absent())]
+    assert scopes[0].sensitive is False
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+def test_render_firewall_ruleset_full_kwarg_matrix_is_disjoint(schema: str) -> None:
+    scopes = render_firewall_ruleset(
+        schema,
+        "ipv4",
+        _FIREWALL_RULESET_NAMED,
+        default_action="accept",
+        description="wan in",
+        rules={20: _RULE_DROP, 10: _RULE_ACCEPT},
+        values={"enable-default-log": {}},
+    )
+    assert_disjoint(scopes)
+    chain = _firewall_ruleset_path("ipv4")
+    assert [scope.path for scope in scopes] == [
+        [*chain, "default-action"],
+        [*chain, "description"],
+        [*chain, "rule", "10"],
+        [*chain, "rule", "20"],
+        chain,
+    ]
+    assert [scope.intent for scope in scopes] == [
+        Exact(["accept"]),
+        Exact(["wan in"]),
+        Exact(_RULE_ACCEPT_NODE),
+        Exact(_RULE_DROP_NODE),
+        Merge({"enable-default-log": {}}),
+    ]
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+def test_render_firewall_ruleset_replace_rules_never_emits_per_rule_scopes(
+    schema: str,
+) -> None:
+    scopes = render_firewall_ruleset(
+        schema,
+        "ipv4",
+        _FIREWALL_RULESET_NAMED,
+        default_action="accept",
+        description="wan in",
+        rules={20: _RULE_DROP, 10: _RULE_ACCEPT},
+        replace_rules=True,
+        values={"enable-default-log": {}},
+    )
+    assert_disjoint(scopes)
+    chain = _firewall_ruleset_path("ipv4")
+    assert [scope.path for scope in scopes] == [
+        [*chain, "default-action"],
+        [*chain, "description"],
+        [*chain, "rule"],
+        chain,
+    ]
+    assert isinstance(scopes[2].intent, Exact)
+    assert scopes[2].intent == Exact({"10": _RULE_ACCEPT_NODE, "20": _RULE_DROP_NODE})
+
+
+@pytest.mark.parametrize("schema", ["1.4", "1.5"])
+@pytest.mark.parametrize("af", _FIREWALL_RULESET_AFS)
+@pytest.mark.parametrize(
+    "chain",
+    [_FIREWALL_RULESET_NAMED, _FIREWALL_RULESET_BASE],
+)
+def test_render_firewall_ruleset_emits_r2_path_tokens(
+    schema: str, af: str, chain: list[str]
+) -> None:
+    scopes = render_firewall_ruleset(schema, af, chain, default_action="accept")
+    assert_disjoint(scopes)
+    assert scopes[0].path == ["firewall", af, *chain, "default-action"]
+    assert isinstance(scopes[0].intent, Exact)
